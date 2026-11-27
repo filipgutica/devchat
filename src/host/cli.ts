@@ -239,12 +239,15 @@ async function main(argv: string[]) {
     case 'settings-merge': {
       const { values } = parseArgs({ args: rest, options: { config: { type: 'string' }, update: { type: 'string' } } })
       const update = installSettingsSchema.parse(JSON.parse(values.update ?? 'null'))
-      let current = null
-      try {
-        current = await readSettings(values.config)
-      } catch (error) {
-        if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
-      }
+      const config = values.config ?? hostPaths.configFile
+      // Its allowlist and machine map flow into the settings root writes: only a root-owned regular
+      // file that only root can change is trusted. A first install has none.
+      const problems = await rootFileProblems(config).catch((error: unknown) => {
+        if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return null
+        throw error
+      })
+      if (problems && problems.length > 0) throw new Error(`not trusting ${config}: ${problems.join('; ')}`)
+      const current = problems ? await readSettings(config) : null
       const settings = mergeSettings(update, current)
       console.error(`  ${describeLists(settings)}`)
       console.log(JSON.stringify(settings, null, 2))

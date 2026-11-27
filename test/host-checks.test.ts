@@ -128,6 +128,10 @@ test('an app.json from before the allowlist parses with an empty allowlist and m
   assert.deepEqual(settingsSchema.parse(before), { ...before, allowlist: [], machines: {} })
   assert.equal(settingsSchema.safeParse({ ...settings, allowlist: ['owner/repo'] }).success, false)
   assert.equal(settingsSchema.safeParse({ ...settings, extra: 1 }).success, false)
+  // The machine map becomes `env` labels: Board's label-value rule applies when settings are parsed.
+  for (const machines of [{ laptop: 'env-1\n' }, { 'lap\ttop': 'env-1' }, { laptop: '' }, { laptop: 'e'.repeat(257) }]) {
+    assert.equal(settingsSchema.safeParse({ ...settings, machines }).success, false, JSON.stringify(machines))
+  }
 })
 
 test('install flags: an absent --allowlist or --machine keeps the installed value, a given one replaces it, an empty one clears it', () => {
@@ -142,20 +146,25 @@ test('install flags: an absent --allowlist or --machine keeps the installed valu
   assert.throws(() => listFlags({ machine: ['laptop'] }), /<name>=<T3 environment ID>/)
 })
 
-test('a rerun of install without --allowlist and --machine keeps both: settings-merge, as the root script runs it', async (t) => {
+test('settings-merge, as the root script runs it, reads app.json only when root alone can change it', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'devchat-settings-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
-  const config = join(dir, 'app.json')
   const { allowlist: _allowlist, machines: _machines, ...ports } = settings
-  const merge = (update: object) => promisify(execFile)(process.execPath,
+  const merge = (config: string, update: object = ports) => promisify(execFile)(process.execPath,
     [new URL('../src/host/cli.ts', import.meta.url).pathname, 'settings-merge', '--config', config, '--update', JSON.stringify(update)])
 
-  const first = await merge(ports)
-  assert.deepEqual(JSON.parse(first.stdout), { ...ports, allowlist: [], machines: {} })
-  await writeFile(config, (await merge({ ...ports, allowlist: ['example'], machines: { laptop: 'env-1' } })).stdout)
-  const rerun = await merge(ports)
-  assert.deepEqual(JSON.parse(rerun.stdout), { ...ports, allowlist: ['example'], machines: { laptop: 'env-1' } })
-  assert.equal(rerun.stderr, '  allowlist: example; machines: laptop=env-1\n')
+  // A first install has no app.json.
+  const first = await merge(join(dir, 'app.json'), { ...ports, allowlist: ['example'] })
+  assert.deepEqual(JSON.parse(first.stdout), { ...ports, allowlist: ['example'], machines: {} })
+  assert.equal(first.stderr, '  allowlist: example; machines: empty\n')
+  // One this account owns, or a link, is refused and named, and nothing is printed for root to write.
+  const owned = join(dir, 'owned.json')
+  await writeFile(owned, first.stdout)
+  await symlink(owned, join(dir, 'link.json'))
+  for (const [config, problem] of [[owned, `${owned} is not root-owned`], [join(dir, 'link.json'), 'is not a regular file']] as const) {
+    await assert.rejects(merge(config), (error: { stdout: string; stderr: string }) =>
+      error.stdout === '' && error.stderr.includes(`not trusting ${config}`) && error.stderr.includes(problem))
+  }
 })
 
 test('rootFileProblems trusts only a root-owned regular file that only root can write', async (t) => {

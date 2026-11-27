@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { lstat, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
+import { labelValue } from '../shared/layout.ts'
 
 /** Fixed host layout: §5 and §8 of the spec. Nothing here comes from the user's home. */
 export const hostPaths = {
@@ -41,8 +42,8 @@ const port = z.number().int().min(1).max(65_535)
  * `<owner>/<repo>` with its owner here, ignoring case. Empty refuses every repo.
  */
 const allowlist = z.array(z.string().regex(/^[A-Za-z0-9-]{1,39}$/, 'a GitHub owner such as octocat'))
-/** Machine name to T3 environment ID: the app sets a work item's `env` from it (§2). */
-const machines = z.record(z.string().min(1).max(256), z.string().min(1).max(256))
+/** Machine name to T3 environment ID: the app sets a work item's `env` label from it (§2). */
+const machines = z.record(labelValue, labelValue)
 
 /**
  * The settings install and verify take. Without an allowlist or machine map, install keeps the
