@@ -44,7 +44,7 @@ The app's state writer reads `inbox` in log order from the app marker's `applied
 - A new root carries `rid`, `by`, and the routing labels `repo`, `machine`, `env`, and `thread`, set once; a work item also carries `issue`. The app sets `env` from the host's machine map (`devchat-host install --machine <name>=<T3 environment ID>`) and leaves it unset for a machine the map does not name.
 - A reply carries `rid`, `by`, `kind`, and the applicable `re`, `block=1`, or `pr.<n>`, where `<n>` is the number at the end of the `pr` URL's `/pull/<n>` path.
 - After each post, the app folds the thread from its root and writes `status`, `ask`, `turn`, and `pr.<n>` on the root.
-- After each page of `inbox` posts, the app sets `applied` on its marker to the message ID of the last post in the page: a decided intent, a refused one, or the marker itself. Every intent up to `applied` has its canonical post and root labels, or `refused`.
+- After each page of `inbox` posts, the app sets `applied` on its marker to the message ID of the last post in the page: a decided intent, a refused one, or the marker itself. Every intent up to `applied` has its canonical post and root labels, or `refused`. A message ID is the board's log index (F2): to learn whether `applied` covers a post, compare the two IDs as integers, never as strings (`'9'` sorts after `'10'`).
 
 | `refused` | Why |
 | --- | --- |

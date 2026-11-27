@@ -107,7 +107,7 @@ function intentFor(channel: 'todos' | 'work', { text, labels }: { text: string; 
 }
 
 for (const { name, channel, steps } of foldFixture) {
-  test(`state writer: ${name}, each post through ingest (fixtures/fold.json: every §2 row but reaction and queue)`, async (t) => {
+  test(`state writer: ${name}, each post through ingest (fixtures/fold.json: every §2 row but reaction and queue, the pending guard, a user reply sets ask=answered and turn, a reply reopens, an ask without block on a blocked item sets status=open)`, async (t) => {
     const host = await startHost(t)
     const writer = host.writer()
     const rootRid = steps[0]?.post.labels.rid
@@ -116,7 +116,8 @@ for (const { name, channel, steps } of foldFixture) {
       if (post.labels.by === 'user') await host.userReply(rootRid, post.labels, post.text)
       else await host.submit(intentFor(channel, post, rootRid))
       await writer.pass()
-      assert.deepEqual(await host.rootLabels(rootRid), rootLabels, `after step ${index + 1}: ${post.text}`)
+      assert.deepEqual(await host.rootLabels(rootRid), rootLabels, `after step ${index + 1} (${post.labels.kind ?? 'root'}`
+        + ` by ${post.labels.by}${post.labels.block ? ', block' : ''}${post.labels.re ? `, re=${post.labels.re}` : ''}): ${post.text}`)
       // Every post is stored as the fixture has it, also one the pending guard keeps from changing the root.
       const stored = (await host.canonical(post.labels.rid ?? ''))?.labels ?? {}
       assert.deepEqual(index === 0 ? Object.fromEntries(Object.entries(stored).filter(([key]) => !isStateLabel(key))) : stored, post.labels)
@@ -125,11 +126,13 @@ for (const { name, channel, steps } of foldFixture) {
   })
 }
 
-test('Ingest: refused intents get refused=<reason> on their inbox post and write nothing', async (t) => {
+test('Ingest: kind=answer, by=user, a state field, a non-allowlisted repo, a missing root, and a message-root, queue, or ack intent get refused=<reason> and write nothing', async (t) => {
   const host = await startHost(t)
   const writer = host.writer()
   await host.submit(work('work-1'))
   await host.submit({ ...base, rid: 'note-1', kind: 'note', root: 'work-1', text: 'A note.' })
+  // A user message root, as the UI route (D4) writes it.
+  await host.owner.post('msg', { id: 'app:msg-1', text: 'For the coordinator.', labels: { rid: 'msg-1', by: 'user' } })
   await writer.pass()
   const before = { work: (await host.messages('work')).length, todos: (await host.messages('todos')).length, msg: (await host.messages('msg')).length }
 
@@ -146,6 +149,7 @@ test('Ingest: refused intents get refused=<reason> on their inbox post and write
     ['deferred', { ...base, rid: 'r-queue', kind: 'queue', root: 'work-1', text: '' }],
     ['deferred', { ...base, rid: 'r-ack', kind: 'ack', root: 'work-1', text: '' }],
     ['pr', { ...base, rid: 'r-pr', kind: 'note', root: 'work-1', text: 'PR.', pr: 'https://example.com/issues/3' }],
+    ['profile', { ...base, rid: 'r-profile', kind: 'note', root: 'msg-1', text: 'Picked up.' }],
     ['json', 'not json'],
   ]
   const ids = new Map<string, string>()
@@ -250,6 +254,19 @@ test('Ingest: a resolve applied before a crash, with a user reply written before
     { rid: 'work-1', by: base.by, repo: 'example/project', status: 'open', ask: 'answered', turn: 'answer-2' })
 })
 
+test('Ingest: a replay folds the thread of an intent already written before applied passes it', async (t) => {
+  const host = await startHost(t)
+  await host.submit(work('work-1'))
+  await host.writer().pass()
+  await host.submit({ ...base, rid: 'ask-1', kind: 'ask', root: 'work-1', text: 'Proceed?', block: 1 })
+  // The canonical post is written, its fold is not; then the replay dies right after moving applied.
+  await assert.rejects(host.writer(({ method, id }) => method === 'reply' && id === 'app:ask-1').pass(), /crash/)
+  const marker = (await host.owner.posted(appMarker.id)).id
+  await assert.rejects(host.writer(({ method, id }) => method === 'label' && id === marker).pass(), /crash/)
+  await assertAppliedCoversOnlyFolded(host)
+  assert.equal((await host.rootLabels('work-1')).status, 'blocked')
+})
+
 /** The board as rids: each conversation post's labels and text, the reply counts, and inbox decisions. */
 async function boardState(host: Awaited<ReturnType<typeof startHost>>) {
   const posts: Record<string, { labels: Labels; text: string }> = {}
@@ -302,7 +319,7 @@ async function crashWorkload(host: Awaited<ReturnType<typeof startHost>>) {
   await host.submit(note, 'note-1-again')
 }
 
-test('State writer: a crash after any post leaves the same labels, and applied passes an intent only after its root labels are written', async (t) => {
+test('State writer: a crash after any post, and a replay from an older cursor, leave the same labels; applied passes an intent only after its root labels are written', async (t) => {
   const reference = await (async () => {
     const host = await startHost(t, { machines: { laptop: 'env-1' } })
     await crashWorkload(host)
@@ -324,6 +341,11 @@ test('State writer: a crash after any post leaves the same labels, and applied p
       let writes = 0
       await assert.rejects(host.writer(() => (writes += 1) === crashAt).pass(), /crash/)
       await assertAppliedCoversOnlyFolded(host)
+      await host.writer().pass()
+      assert.deepEqual(await boardState(host), reference.state)
+      // A replay from an older cursor: the whole inbox again, with no fold cursor.
+      await host.owner.label((await host.owner.posted(appMarker.id)).id, { unset: ['applied'] })
+      await rm(host.stateFile)
       await host.writer().pass()
       assert.deepEqual(await boardState(host), reference.state)
     })
