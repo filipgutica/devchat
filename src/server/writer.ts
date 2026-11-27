@@ -1,4 +1,5 @@
 import { board, BoardError, type Board, type MessageView } from '@vercel/board'
+import { createHash } from 'node:crypto'
 import { readFile, rename, writeFile } from 'node:fs/promises'
 import { isDeepStrictEqual } from 'node:util'
 import { z } from 'zod'
@@ -112,16 +113,27 @@ type Labels = Record<string, string>
 type PlannedPost = { channel: string; parent: string | null; text: string; labels: Labels }
 
 /**
+ * The post with its `digest` label: the SHA-256 of the exact text the app asks Board to write, in
+ * hex. Board rewrites a known `@handle` in the text it stores, so a replay compares this label, not
+ * the stored text. Only the app's canonical write sets it: no intent or UI write carries labels.
+ */
+const withDigest = <T extends { text: string; labels: Labels }>(post: T): T => ({
+  ...post,
+  labels: { ...post.labels, digest: createHash('sha256').update(post.text).digest('hex') },
+})
+
+/**
  * Whether `written`, the app's post with a rid's client ID, is `post`: the same channel, parent
- * root, text, and labels. A root's state labels change with its thread, and its `env` with the
- * host's machine map, so neither is compared. A deleted post keeps no text or labels, so it is not.
+ * root, and labels, its text's `digest` among them. A root's state labels change with its thread,
+ * and its `env` with the host's machine map, so neither is compared. A deleted post keeps no
+ * labels, and a post without `digest` was not written as `post`, so neither is.
  */
 function isWrittenAs(written: MessageView, post: PlannedPost) {
   const fixed = (labels: Labels) => (written.re === null
     ? Object.fromEntries(Object.entries(labels).filter(([key]) => !isStateLabel(key) && key !== 'env'))
     : labels)
   return !written.deleted && written.channel === post.channel && written.re === post.parent
-    && written.text === post.text && isDeepStrictEqual(fixed(written.labels), fixed(post.labels))
+    && isDeepStrictEqual(fixed(written.labels), fixed(post.labels))
 }
 
 const definedLabels = (labels: Record<string, string | undefined>): Labels =>
@@ -166,7 +178,7 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
   function canonicalPost(intent: Intent): { text: string; labels: Labels } | RefusalReason {
     if (!('root' in intent)) {
       const { machine } = intent
-      return {
+      return withDigest({
         text: intent.text,
         labels: definedLabels({
           rid: intent.rid,
@@ -177,7 +189,7 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
           thread: intent.thread,
           issue: intent.kind === 'work' ? intent.issue : undefined,
         }),
-      }
+      })
     }
     const labels = definedLabels({ rid: intent.rid, by: intent.by, kind: intent.kind, re: intent.re })
     if (intent.kind === 'note' && intent.pr !== undefined) {
@@ -187,7 +199,7 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
     }
     if (intent.kind === 'ask' && intent.block === 1) labels.block = '1'
     const text = intent.kind === 'done' ? 'Resolved.' : intent.kind === 'drop' ? 'Dropped.' : intent.text
-    return { text, labels }
+    return withDigest({ text, labels })
   }
 
   /** Whether `written`, the app's post `app:<rid>`, is the canonical post of this very intent. A rid reused by another intent is not. */
@@ -294,7 +306,7 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
   async function plannedUserPost(port: BoardPort, write: UserWrite): Promise<PlannedPost | 'root'> {
     if (!('root' in write)) {
       const channel = write.kind === 'todo' ? channels.todos : channels.work
-      return { channel, parent: null, text: write.text, labels: definedLabels({ rid: write.rid, by: 'user', repo: write.repo }) }
+      return withDigest({ channel, parent: null, text: write.text, labels: definedLabels({ rid: write.rid, by: 'user', repo: write.repo }) })
     }
     // An answer goes under a work item; a resolve under a todo or work item.
     const target = await findOwn(port, `app:${write.root}`)
@@ -302,7 +314,7 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
     if (!target || target.deleted || target.re !== null || !targetChannels.includes(target.channel)) return 'root'
     const re = write.kind === 'answer' ? write.re : undefined
     const text = write.kind === 'done' ? 'Resolved.' : write.text
-    return { channel: target.channel, parent: target.id, text, labels: definedLabels({ rid: write.rid, by: 'user', kind: write.kind, re }) }
+    return withDigest({ channel: target.channel, parent: target.id, text, labels: definedLabels({ rid: write.rid, by: 'user', kind: write.kind, re }) })
   }
 
   /** Why a new UI write is refused: `repo` off the allowlist, or `re` not a question in its thread. */

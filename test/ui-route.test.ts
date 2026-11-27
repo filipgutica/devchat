@@ -14,6 +14,7 @@ import { createApp } from '../src/server/app.ts'
 import { guardReason } from '../src/server/guard.ts'
 import { createStateWriter } from '../src/server/writer.ts'
 import type { Intent } from '../src/shared/layout.ts'
+import { sha256, withoutDigest } from './digest.ts'
 import { startBoardServer } from '../src/testing/index.ts'
 
 type Labels = Record<string, string>
@@ -91,7 +92,8 @@ async function startHost(t: TestContext, {
       page = await owner.channel(channel).messages({ after: page.cursor })) all.push(...page.messages)
     return all
   }
-  const posted = async (rid: string) => (await owner.posted(`app:${rid}`))
+  /** The app's post for `rid` without its `digest`, which tests check on their own. */
+  const posted = async (rid: string) => withoutDigest(await owner.posted(`app:${rid}`))
   return { owner, writer, call, write, submit, messages, posted }
 }
 
@@ -354,7 +356,7 @@ test('A retried UI write replays: the same rid and body answer 200 with one post
 
   // A retry repairs a write that stopped after its post: the replay folds the thread.
   const crashed = uiRid()
-  await host.owner.post('work', { id: `app:${crashed}`, text: 'A goal.', labels: { rid: crashed, by: 'user' } })
+  await host.owner.post('work', { id: `app:${crashed}`, text: 'A goal.', labels: { rid: crashed, by: 'user', digest: sha256('A goal.') } })
   const repaired = await host.write({ rid: crashed, kind: 'work', text: 'A goal.' })
   assert.deepEqual([repaired.status, repaired.json().state], [200, { status: 'open' }])
   assert.equal((await host.posted(crashed)).labels.status, 'open')
@@ -375,7 +377,7 @@ test('Ingest replays an agent intent with a ui- rid whose canonical post it alre
   const host = await startHost(t)
   // An intent applied before the reservation, or before a crash moved `applied`: its canonical post exists.
   const legacy = { ...agent, rid: 'ui-legacy', kind: 'todo', channel: 'todos', text: 'Written before a crash.' } as const
-  await host.owner.post('todos', { id: 'app:ui-legacy', text: legacy.text, labels: { rid: legacy.rid, by: legacy.by } })
+  await host.owner.post('todos', { id: 'app:ui-legacy', text: legacy.text, labels: { rid: legacy.rid, by: legacy.by, digest: sha256(legacy.text) } })
   await host.submit(legacy)
   // A UI post, then an agent intent that reuses its rid.
   const ui = (await host.write({ kind: 'todo', text: 'From the UI.' })).json().rid
@@ -495,5 +497,34 @@ test('A Board error on the UI post: duplicate_id answers 409 conflict with a JSO
 
   failure.error = new BoardError('unavailable', 'stubbed outage', 503)
   assert.equal((await host.write({ rid, kind: 'todo', text: 'Board is down.' })).status, 500)
+  assert.deepEqual(await host.messages('todos'), [])
+})
+
+test('A UI retry of a post with an @handle replays with 200, though Board stored the mention resolved', async (t) => {
+  const host = await startHost(t)
+  // The tailnet login's first post makes it a Board actor with the handle `user`.
+  await host.submit({ ...agent, rid: 'work-1', kind: 'work', channel: 'work', text: 'Goal.' })
+  await host.writer.pass()
+  const body = { rid: uiRid(), kind: 'todo', text: 'Review with @user.' }
+  assert.equal((await host.write(body)).status, 201)
+  const stored = await host.owner.posted(`app:${body.rid}`)
+  assert.notEqual(stored.text, body.text, 'Board resolved the mention')
+  assert.equal(stored.labels.digest, sha256(body.text))
+
+  const retry = await host.write(body)
+  assert.deepEqual([retry.status, retry.json().rid], [200, body.rid])
+  assert.equal((await host.write({ ...body, text: 'Review with @user later.' })).status, 409)
+  // The answer under that thread too.
+  const answer = { rid: uiRid(), kind: 'answer', root: 'work-1', text: 'Ask @user first.' }
+  assert.equal((await host.write(answer)).status, 201)
+  assert.equal((await host.write(answer)).status, 200)
+  assert.equal((await host.messages('todos')).length, 1)
+  assert.equal((await host.messages('work')).length, 2)
+})
+
+test('No UI write sets the digest label', async (t) => {
+  const host = await startHost(t)
+  const forged = await host.write({ kind: 'todo', text: 'Review.', digest: sha256('Another text.') })
+  assert.equal(forged.status, 400)
   assert.deepEqual(await host.messages('todos'), [])
 })

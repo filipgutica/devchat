@@ -28,7 +28,7 @@ export const labelKeys = [
   'root', 're', 'date', 'to', 'done', 'refused', 'applied', 'state', 'act',
   'subject', 'origin', 'generic', 'created', 'linked', 'superseded-by', 'pin',
   'signal', 'ctx', 'counts', 'run', 'epoch', 'migrating', 'mode', 'synced',
-  'private', 'block', 'react',
+  'private', 'block', 'react', 'digest',
 ] as const
 
 export const labelKeyPrefixes = ['pr.', 'trigger.', 'used.', 'mig.'] as const
