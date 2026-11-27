@@ -19,10 +19,12 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && vite build --config ui/vite.config.ts",
+    "dev": "node scripts/dev.ts",
     "release": "semantic-release",
     "test": "node --test test/*.test.ts",
-    "typecheck": "tsc --noEmit",
+    "test:ui": "playwright test",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p ui && tsc --noEmit -p test/ui",
     "verify": "pnpm typecheck && pnpm test && pnpm build && pnpm pack --dry-run"
   },
   "engines": {
@@ -42,11 +44,22 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
     "@commitlint/cli": "21.2.2",
     "@commitlint/config-conventional": "21.2.2",
+    "@filipgutica/design-system": "1.0.46",
+    "@playwright/test": "1.65.1",
     "@types/node": "^22",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@ui-sdk/core": "0.1.0-beta.5",
+    "@ui-sdk/react": "0.1.0-beta.5",
+    "@vitejs/plugin-react": "6.2.1",
     "conventional-changelog-conventionalcommits": "9.3.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
     "semantic-release": "25.0.9",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vite": "8.3.8"
   }
 }

@@ -21,6 +21,9 @@ jobs:
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
+      # The UI tests drive the built shell (pnpm verify builds it) in Chromium against a real local board.
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:ui
 
   # Installs the packed package the way a host does, then runs the release 1 trust checks.
   # GitHub's Ubuntu runner has systemd and passwordless sudo; verify itself runs without sudo.

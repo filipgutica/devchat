@@ -1,6 +1,7 @@
 import { once } from 'node:events'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 import { boardUrl, hostPaths, readSettings } from '../host/settings.ts'
 import { createApp } from './app.ts'
@@ -15,7 +16,9 @@ const { version } = z.object({ version: z.string() })
   .parse(JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')))
 const writer = createStateWriter({ settings, stateFile: join(hostPaths.stateDir, 'app-state.json') })
 // A UI write wakes the ingest loop, so a pass runs right after it (§12).
-const server = createApp({ version, writerStats: writer.stats, ui: { settings, guard: guardReason, writer, onWrite: () => void ingestLoop() } })
+// The built web UI sits beside dist/server, in dist/ui.
+const shell = fileURLToPath(new URL('../ui/', import.meta.url))
+const server = createApp({ version, writerStats: writer.stats, shell, ui: { settings, guard: guardReason, writer, onWrite: () => void ingestLoop() } })
 server.listen(settings.appPort, '127.0.0.1')
 await once(server, 'listening')
 console.log(`devchat app on http://127.0.0.1:${settings.appPort}`)

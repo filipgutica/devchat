@@ -1,0 +1,2 @@
+minimumReleaseAgeExclude:
+  - '@filipgutica/design-system@1.0.46'

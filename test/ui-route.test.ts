@@ -528,3 +528,35 @@ test('No UI write sets the digest label', async (t) => {
   assert.equal(forged.status, 400)
   assert.deepEqual(await host.messages('todos'), [])
 })
+
+test('Search finds open and resolved threads in todos and work by their root or a reply, and nothing in other channels', async (t) => {
+  const host = await startHost(t)
+  await host.submit({ ...agent, rid: 'work-1', kind: 'work', channel: 'work', text: 'Ship the parrot exporter.', repo: 'example/one' })
+  await host.submit({ ...agent, rid: 'note-1', root: 'work-1', kind: 'note', text: 'The walrus step is slow.' })
+  await host.submit({ ...agent, rid: 'todo-1', kind: 'todo', channel: 'todos', text: 'Feed the parrot.' })
+  await host.writer.pass()
+  await host.write({ kind: 'done', root: 'todo-1' })
+  // Words that sit only in an intent's JSON in inbox, or in another channel, never come back.
+  await host.submit({ ...agent, rid: 'todo-bad', kind: 'todo', channel: 'todos', text: 'Pelican.', repo: 'other/one' })
+  await host.writer.pass()
+  await host.owner.post('msg', { text: 'A pelican message.' })
+
+  type Found = { threads: Thread[] }
+  const search = async (query: string) => {
+    const response = await host.call(`/api/ui/search?${query}`)
+    assert.equal(response.status, 200, query)
+    return response.json<Found>().threads.map(({ message }) => message.labels.rid).sort()
+  }
+  assert.deepEqual(await search('q=parrot'), ['todo-1', 'work-1'], 'a resolved todo and an open work item')
+  assert.deepEqual(await search('q=walrus'), ['work-1'], 'a match in a reply')
+  assert.deepEqual(await search('q=parrot&channel=todos'), ['todo-1'])
+  assert.deepEqual(await search('q=pelican'), [])
+  assert.deepEqual(await search('q=todo-bad'), [])
+  assert.deepEqual(await search(`q=${encodeURIComponent('"parrot*) OR (')}`), [], 'search syntax is plain text')
+
+  for (const [query, status] of [['q=', 400], [`q=${'x'.repeat(201)}`, 400], ['q=parrot&channel=inbox', 400], ['q=parrot&channel=msg', 400]] as const) {
+    assert.equal((await host.call(`/api/ui/search?${query}`)).status, status, query)
+  }
+  assert.equal((await host.call('/api/ui/search?q=parrot', { headers: { 'Tailscale-User-Login': 'other@example.com' } })).status, 403)
+  assert.equal((await host.call('/api/ui/search?q=parrot', { headers: { Host: 'localhost' } })).status, 403)
+})

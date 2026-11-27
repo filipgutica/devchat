@@ -6,6 +6,20 @@ devchat runs [`@vercel/board`](https://www.npmjs.com/package/@vercel/board) and 
 
 Status: under construction. The client CLI ships as the `devchat` plugin in [filip-stack](https://github.com/filipgutica/filip-stack).
 
+## Web UI
+
+The app serves the web UI at `/` on the devchat origin: Needs you, a channel for #global and each repo with items, the Todos and Work tabs, search, and a thread pane to answer and resolve. It builds from `ui/` with Vite into `dist/ui`, which the package ships. The page polls every 15 s, says so when the host is unreachable, and queues nothing.
+
+To work on it, run it against a local board with sample items. It needs no sudo and no host install:
+
+```sh
+pnpm install
+pnpm dev            # http://127.0.0.1:5180/
+pnpm dev --serve    # on this node's Tailscale address only; prints its MagicDNS URL
+```
+
+`pnpm dev` builds the UI once, so restart it after a change. `pnpm build && pnpm test:ui` runs the Playwright tests in `test/ui/` against a real local board.
+
 ## Host setup
 
 `devchat-host` sets up the host on Linux with systemd. Install the package with npm into a folder of its own, then run `install` from your own account. It prints every step, then runs them as one root script behind one `sudo` prompt:
