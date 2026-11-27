@@ -6,7 +6,7 @@ import { Icon, IconSprite } from './icons.tsx'
 import { AuthorsInView } from './message.tsx'
 import { parseRoute, routeHref, type Route, type View } from './route.ts'
 import { ThreadPane } from './thread-pane.tsx'
-import { ChannelView, NeedsYouView, SearchView } from './views.tsx'
+import { ChannelView, NeedsYouView, NotFoundView, SearchView } from './views.tsx'
 
 /** The open page reads the board again this often (§12); nothing uses watchers. */
 const pollMs = 15_000
@@ -15,7 +15,7 @@ const pollMs = 15_000
 const viewKey = (view: View) => JSON.stringify(view)
 
 async function readList(view: View): Promise<ThreadSummary[] | null> {
-  if (view.kind === 'needs-you') return null
+  if (view.kind === 'needs-you' || view.kind === 'not-found') return null
   if (view.kind === 'channel') return readChannel(view)
   if (!view.q) return []
   return (await read<{ threads: ThreadSummary[] }>(`search?q=${encodeURIComponent(view.q)}`)).threads
@@ -149,7 +149,7 @@ export function App() {
   const isChannel = (repo: string | null) => view.kind === 'channel' && view.repo === repo
   const waiting = needsYou?.open.length ?? 0
   const summaries = [...(needsYou?.open ?? []), ...(needsYou?.answered ?? []), ...(threads ?? [])]
-  const posts = [...summaries.flatMap(({ message, last }) => (last ? [message, last] : [message])), ...(thread ? [thread.value?.root, ...(thread.value?.replies ?? [])] : [])]
+  const posts = [...summaries.flatMap(({ message, last, turn }) => [message, last, turn]), ...(thread ? [thread.value?.root, ...(thread.value?.replies ?? [])] : [])]
   const authors = [...new Set(posts.flatMap((post) => (post ? [authorName(byOf(post))] : [])))]
 
   return (
@@ -158,6 +158,16 @@ export function App() {
       <a className="skip" href="#main" onClick={(event) => { event.preventDefault(); document.getElementById('main')?.focus() }}>Skip to content</a>
       <AuthorsInView.Provider value={authors}>
         <div className={route.thread ? 'shell has-thread' : 'shell'}>
+          {/* Above every column, so the notice shows on a phone too, where the thread replaces the list. */}
+          <div className="notices">
+            {offline && (
+              <div className="alert warning" role="status">
+                <Icon name="alert" />
+                <p>Offline: devchat can't be reached. {loadedAt ? `Showing what loaded at ${clock(loadedAt)}. ` : ''}It checks again every 15 seconds.</p>
+              </div>
+            )}
+            {readError && !offline && <div className="alert danger" role="alert"><Icon name="alert" /><p>{readError}</p></div>}
+          </div>
           <aside className="sidebar" aria-label="devchat">
             <p className="app-name">devchat</p>
             <form role="search" className="search" onSubmit={onSearch}>
@@ -177,16 +187,10 @@ export function App() {
             </nav>
           </aside>
           <main id="main" tabIndex={-1}>
-            {offline && (
-              <div className="alert warning" role="status">
-                <Icon name="alert" />
-                <p>Offline: devchat can't be reached. {loadedAt ? `Showing what loaded at ${clock(loadedAt)}. ` : ''}It checks again every 15 seconds.</p>
-              </div>
-            )}
-            {readError && !offline && <div className="alert danger" role="alert"><Icon name="alert" /><p>{readError}</p></div>}
             {view.kind === 'needs-you' && <NeedsYouView {...shared} data={needsYou} />}
             {view.kind === 'channel' && <ChannelView {...shared} view={view} threads={threads} offline={offline} onSaved={onSaved} />}
             {view.kind === 'search' && <SearchView {...shared} q={view.q} threads={threads} />}
+            {view.kind === 'not-found' && <NotFoundView />}
           </main>
           {route.thread && (
             <ThreadPane key={route.thread} rid={route.thread} repos={repos} offline={offline} onClose={closeThread} onSaved={onSaved}

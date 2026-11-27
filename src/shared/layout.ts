@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { githubRepoPattern, isDotRepoName } from './github.ts'
 
 export const channels = {
   inbox: 'inbox',
@@ -45,11 +46,9 @@ export const rid = z.string().max(196).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, 'A
  */
 export const uiRid = z.string().regex(/^ui-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, 'A UI rid is ui-<lowercase UUID>')
 export const isUiNamespace = (value: string) => /^ui-/i.test(value)
-// GitHub's names: an owner of 1 to 39 letters, digits, and single inner hyphens, and a repo of 1 to
-// 100 letters, digits, `.`, `_`, and `-`, other than `.` and `..`.
 const githubRepo = z.string()
-  .regex(/^(?=[^/]{1,39}\/)[A-Za-z0-9](?:-?[A-Za-z0-9])*\/[A-Za-z0-9._-]{1,100}$/, 'A repo is <owner>/<repo> as GitHub names it')
-  .refine((repo) => !/\/\.{1,2}$/.test(repo), 'A repo name is not . or ..')
+  .regex(githubRepoPattern, 'A repo is <owner>/<repo> as GitHub names it')
+  .refine((repo) => !isDotRepoName(repo), 'A repo name is not . or ..')
 const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
 // Fields the app copies into labels must fit Board's label values: 1 to 256 characters, with no
 // control characters and no lone surrogates. The host's settings use it for the machine map too.

@@ -201,7 +201,7 @@ test('A retry after a dropped answer resends the same rid and body, and the boar
   expect(host.writes[1]).toBe(host.writes[0])
 })
 
-test('A changed text sent under a rid that already landed answers 409; the next send takes a new rid', async ({ page, host }) => {
+test('An edited draft never takes the rid of an unconfirmed write: it waits until that write is retried or discarded', async ({ page, host }) => {
   await open(page, host, '#/global')
   host.dropNextWriteResponse()
   await composer(page, 'New todo in #global').fill('First text.')
@@ -210,17 +210,169 @@ test('A changed text sent under a rid that already landed answers 409; the next 
 
   await composer(page, 'New todo in #global').fill('Second text.')
   await composer(page, 'New todo in #global').press('Enter')
-  await expect(page.getByText('Not saved: an earlier send of this message may already be on the board. Check the thread, then send again.')).toBeVisible()
-  await expect(composer(page, 'New todo in #global')).toHaveValue('Second text.')
-  await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0)
+  await expect(page.getByText('Not sent: the earlier text may already be on the board. Retry it, or discard it to send this text.')).toBeVisible()
+  expect(host.writes).toHaveLength(1)
 
+  await page.getByRole('button', { name: 'Discard' }).click()
   await composer(page, 'New todo in #global').press('Enter')
   await expect(rows(page, 'Open todos in #global')).toHaveCount(2)
   const rids = host.writes.map((body) => (JSON.parse(body) as { rid: string }).rid)
-  expect(rids).toHaveLength(3)
-  expect(rids[1]).toBe(rids[0])
-  expect(rids[2]).not.toBe(rids[0])
+  expect(rids).toHaveLength(2)
+  expect(rids[1]).not.toBe(rids[0])
   expect((await posts(host, 'todos')).map((post) => post.text).sort()).toEqual(['First text.', 'Second text.'])
+})
+
+test('A 409 says an earlier send may be on the board, keeps the text, and the next send takes a new rid', async ({ page, host }) => {
+  await open(page, host, '#/global')
+  let conflict = true
+  await page.route('**/api/ui/posts', async (route) => {
+    if (!conflict) return route.continue()
+    conflict = false
+    await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: 'refused', refused: 'conflict' }) })
+  })
+  await composer(page, 'New todo in #global').fill('Only once.')
+  await composer(page, 'New todo in #global').press('Enter')
+  await expect(page.getByText('Not saved: an earlier send of this message may already be on the board. Check the thread, then send again.')).toBeVisible()
+  await expect(composer(page, 'New todo in #global')).toHaveValue('Only once.')
+  await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0)
+
+  await composer(page, 'New todo in #global').press('Enter')
+  await expect(rows(page, 'Open todos in #global')).toHaveCount(1)
+  expect(host.writes).toHaveLength(1)
+  expect((await posts(host, 'todos')).map((post) => post.text)).toEqual(['Only once.'])
+})
+
+test('Each tab keeps its own unconfirmed write: a work item sent meanwhile takes a new rid, and the todo still retries', async ({ page, host }) => {
+  await open(page, host, '#/global')
+  host.dropNextWriteResponse()
+  await composer(page, 'New todo in #global').fill('Todo text.')
+  await composer(page, 'New todo in #global').press('Enter')
+  await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible()
+
+  await page.getByRole('tab', { name: 'Work' }).click()
+  await composer(page, 'New work item in #global').fill('Work text.')
+  await composer(page, 'New work item in #global').press('Enter')
+  await expect(rows(page, 'Open work items in #global')).toHaveCount(1)
+  await expect(page.locator('.field-error').filter({ visible: true })).toHaveCount(0)
+
+  await page.getByRole('tab', { name: 'Todos' }).click()
+  await expect(composer(page, 'New todo in #global')).toHaveValue('Todo text.')
+  await page.getByRole('button', { name: 'Retry' }).click()
+  await expect(rows(page, 'Open todos in #global')).toHaveCount(1)
+  const sent = host.writes.map((body) => JSON.parse(body) as { rid: string; kind: string; text: string })
+  expect(sent.map(({ kind, text }) => [kind, text])).toEqual([['todo', 'Todo text.'], ['work', 'Work text.'], ['todo', 'Todo text.']])
+  expect(sent[2]!.rid).toBe(sent[0]!.rid)
+  expect(sent[1]!.rid).not.toBe(sent[0]!.rid)
+  expect((await posts(host, 'todos')).map((post) => post.text)).toEqual(['Todo text.'])
+  expect((await posts(host, 'work')).map((post) => post.text)).toEqual(['Work text.'])
+})
+
+test('Send stays locked until the confirmed draft is cleared, even while the read after it is held', async ({ page, host }) => {
+  await open(page, host, '#/global')
+  let release = () => {}
+  const held = new Promise<void>((resolve) => { release = resolve })
+  let hold = false
+  await page.route('**/api/ui/**', async (route) => {
+    if (hold && route.request().method() === 'GET') await held
+    await route.continue()
+  })
+  await composer(page, 'New todo in #global').fill('Save me once.')
+  hold = true
+  await composer(page, 'New todo in #global').press('Enter')
+  await expect.poll(() => host.writes.length).toBe(1)
+  await expect(composer(page, 'New todo in #global')).toHaveValue('')
+  await composer(page, 'New todo in #global').press('Enter')
+  await page.getByRole('button', { name: 'Send' }).click()
+  hold = false
+  release()
+  await expect(rows(page, 'Open todos in #global')).toHaveCount(1)
+  expect(host.writes).toHaveLength(1)
+  expect((await posts(host, 'todos')).map((post) => post.text)).toEqual(['Save me once.'])
+})
+
+test('A reply stays bound to the question it started under: a new question blocks sending until the user answers it', async ({ page, host }) => {
+  await host.submit({ ...agent, rid: 'work-1', kind: 'work', channel: 'work', text: 'Ship the exporter.', repo: 'example/one' })
+  await host.submit({ ...agent, rid: 'ask-1', root: 'work-1', kind: 'ask', text: 'Which port?' })
+  await host.pass()
+  await page.clock.install()
+  await open(page, host, '#/needs-you?thread=work-1')
+  // By role alone: the field's name changes to "Reply to …" once a read shows the answer.
+  const field = page.getByRole('complementary', { name: /Thread/ }).getByRole('textbox')
+  await expect(field).toHaveAccessibleName('Answer laptop-claude')
+  await field.fill('Use 8443.')
+
+  await host.submit({ ...agent, rid: 'ask-2', root: 'work-1', kind: 'ask', text: 'Which host?' })
+  await host.pass()
+  await page.clock.runFor(15_000)
+  await expect(page.getByText('A new question arrived: “Which host?” Your reply is kept.')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Send' })).toBeDisabled()
+  await field.press('Enter')
+  await expect(field).toHaveValue('Use 8443.')
+  expect(host.writes).toHaveLength(0)
+
+  await page.getByRole('button', { name: 'Answer this question' }).click()
+  await field.fill('Use 8443 on the edge host.')
+  await field.press('Enter')
+  await expect(field).toHaveValue('')
+  expect(host.writes).toHaveLength(1)
+  const answer = (await posts(host, 'work')).find((post) => post.labels.kind === 'answer')
+  expect(answer?.labels).toMatchObject({ re: 'ask-2', by: 'user' })
+  expect(answer?.text).toBe('Use 8443 on the edge host.')
+})
+
+test('"You answered" shows the user\'s answer, not an agent note posted after it', async ({ page, host }) => {
+  await host.submit({ ...agent, rid: 'work-1', kind: 'work', channel: 'work', text: 'Ship the exporter.', repo: 'example/one' })
+  await host.submit({ ...agent, rid: 'ask-1', root: 'work-1', kind: 'ask', text: 'Which port?' })
+  await host.pass()
+  await open(page, host, '#/needs-you?thread=work-1')
+  await composer(page, 'Answer laptop-claude').fill('Use 8443.')
+  await composer(page, 'Answer laptop-claude').press('Enter')
+  await expect(page.locator('.thread-pane .composer-hint')).toContainText('Saved to the board.')
+  // The pending guard skips this note for the root's state, but it is the thread's last post.
+  await host.submit({ ...agent, rid: 'note-1', root: 'work-1', kind: 'note', text: 'Still building.' })
+  await host.pass()
+  await page.reload()
+  const answered = rows(page, 'You answered')
+  await expect(answered).toHaveCount(1)
+  await expect(answered.first()).toContainText('Use 8443.')
+  await expect(answered.first()).not.toContainText('Still building.')
+  await expect(answered.first()).toContainText('You')
+})
+
+test('A work item shows its issue, pull requests, and source thread, linked only from values that check out', async ({ page, host }) => {
+  await host.submit({ ...agent, rid: 'work-1', kind: 'work', channel: 'work', text: 'Ship the exporter.', repo: 'example/one', issue: 'example/one#12', thread: 'desktop:abc' })
+  await host.submit({ ...agent, rid: 'note-1', root: 'work-1', kind: 'note', text: 'Opened the PR.', pr: 'https://github.com/example/one/pull/34' })
+  await host.submit({ ...agent, rid: 'work-2', kind: 'work', channel: 'work', text: 'Odd refs.', repo: 'example/100%done', issue: 'javascript:alert(1)', thread: 'https://example.com/t/1' })
+  await host.submit({ ...agent, rid: 'note-2', root: 'work-2', kind: 'note', text: 'A PR.', pr: 'javascript:alert(1)//pull/7' })
+  await host.pass()
+
+  await open(page, host, '#/needs-you?thread=work-1')
+  const pane = page.getByRole('complementary', { name: /Thread/ })
+  await expect(pane.getByRole('link', { name: 'Issue example/one#12' })).toHaveAttribute('href', 'https://github.com/example/one/issues/12')
+  await expect(pane.getByRole('link', { name: 'PR #34' })).toHaveAttribute('href', 'https://github.com/example/one/pull/34')
+  await expect(pane.getByText('From thread desktop:abc')).toBeVisible()
+  await expect(pane.getByRole('link', { name: 'From thread desktop:abc' })).toHaveCount(0)
+
+  await open(page, host, '#/needs-you?thread=work-2')
+  await expect(pane.getByText('Issue javascript:alert(1)')).toBeVisible()
+  await expect(pane.getByRole('link', { name: /^Issue/ })).toHaveCount(0)
+  await expect(pane.getByText('PR #7')).toBeVisible()
+  await expect(pane.getByRole('link', { name: 'PR #7' })).toHaveCount(0)
+  await expect(pane.getByRole('link', { name: 'From thread https://example.com/t/1' })).toHaveAttribute('href', 'https://example.com/t/1')
+  expect(await page.locator('a[href^="javascript:" i]').count()).toBe(0)
+})
+
+test('A repo name with % links and opens its channel; a malformed link shows not found', async ({ page, host }) => {
+  await host.submit({ ...agent, rid: 'work-1', kind: 'work', channel: 'work', text: 'Percent repo.', repo: 'example/100%done' })
+  await host.pass()
+  await open(page, host)
+  await page.getByRole('navigation', { name: 'Channels' }).getByRole('link', { name: '#100%done' }).click()
+  await page.getByRole('tab', { name: 'Work' }).click()
+  await expect(rows(page, 'Open work items in #100%done')).toHaveCount(1)
+  expect(page.url()).toContain('#/repo/example/100%25done')
+
+  await page.goto(`${host.url}#/repo/example/100%done`)
+  await expect(page.getByRole('heading', { name: 'Not found', level: 1 })).toBeVisible()
 })
 
 test('Guarded text is refused with the guard\'s reason and never echoed, and nothing is saved', async ({ page, host }) => {
@@ -267,7 +419,7 @@ test('The page polls every 15 s; offline it says so, keeps what it shows, and di
   await expect(rows(page, 'Open todos in #global')).toHaveCount(2)
   await expect(composer(page, 'New todo in #global')).toBeDisabled()
   await expect(composer(page, 'New todo in #global')).toHaveValue('Draft while offline.')
-  await expect(page.getByText("Offline: devchat can't be reached. Sending comes back when it can.")).toBeVisible()
+  await expect(page.getByText("Offline: devchat can't be reached. Sending comes back when it can.").filter({ visible: true })).toBeVisible()
 
   host.setReachable(true)
   await page.clock.runFor(15_000)
@@ -305,4 +457,18 @@ test('On a phone the thread replaces the list; Back, or the browser\'s Back, ret
   }
   // Back took the history entry the thread made, so one more Back leaves this view.
   expect(page.url()).toContain('#/repo/example/one?tab=work')
+})
+
+test('On a phone the offline notice shows over an open thread, and Resolve is disabled', async ({ page, host }) => {
+  await host.submit({ ...agent, rid: 'todo-1', kind: 'todo', channel: 'todos', text: 'Water the plants.' })
+  await host.pass()
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.clock.install()
+  await open(page, host, '#/global?thread=todo-1')
+  const pane = page.getByRole('complementary', { name: /Thread/ })
+  await expect(pane.getByRole('button', { name: 'Resolve' })).toBeEnabled()
+  host.setReachable(false)
+  await page.clock.runFor(15_000)
+  await expect(page.getByRole('status').filter({ hasText: "Offline: devchat can't be reached." })).toBeVisible()
+  await expect(pane.getByRole('button', { name: 'Resolve' })).toBeDisabled()
 })

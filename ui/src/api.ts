@@ -11,7 +11,8 @@ export type Message = {
   createdAt: string
 }
 /** A thread at a glance: its root, its reply count, and its newest reply. */
-export type ThreadSummary = { message: Message; replies: number; last: Message | null }
+/** `turn` comes with Needs you only: the post the root's `turn` label names, if any. */
+export type ThreadSummary = { message: Message; replies: number; last: Message | null; turn?: Message | null }
 export type Thread = { root: Message; replies: Message[] }
 export type NeedsYou = { open: ThreadSummary[]; answered: ThreadSummary[] }
 export type Tab = 'todos' | 'work'

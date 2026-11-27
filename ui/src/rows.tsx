@@ -28,13 +28,12 @@ function rootStatus({ message, last }: ThreadSummary): RowStatus | undefined {
 }
 
 /**
- * One thread as a message row in a list. In Needs you the row is the post that waits: the agent's
+ * One thread as a message row in a list. In Needs you the row is the post `turn` names: the agent's
  * question, or under "You answered" the user's answer; elsewhere it is the root.
  */
 export function threadItem({ summary, mode, repos, href, current }: ThreadItemOptions): StreamItem {
   const { message: root, last, replies } = summary
-  const turnPost = last?.labels.rid === root.labels.turn ? last : null
-  const shown = mode === 'needs-you' ? turnPost ?? root : mode === 'answered' ? last ?? root : root
+  const shown = mode === 'needs-you' || mode === 'answered' ? summary.turn ?? root : root
   const status = mode === 'answered' ? undefined : rootStatus(summary)
   const resolvedBy = mode === 'resolved' || mode === 'search' ? resolution(last) : null
   const linkText = shown === root ? replyCount(replies) : title(root.text)

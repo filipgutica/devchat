@@ -78,6 +78,19 @@ async function viewThreads(port: BoardPort, labels: string[]) {
   return [...found.values()]
 }
 
+/**
+ * Each thread with the post its `turn` names, the question that waits or the user's answer, which a
+ * Needs you row shows. A later reply can follow it: the pending guard skips an agent's note that does
+ * not answer the user (§2), so `last` is not always the turn.
+ */
+async function withTurn<T extends { message: MessageView; last: MessageView | null }>(port: BoardPort, threads: T[]) {
+  return Promise.all(threads.map(async (thread) => {
+    const { turn } = thread.message.labels
+    const post = !turn ? null : thread.last?.labels.rid === turn ? thread.last : await findOwn(port, `app:${turn}`)
+    return { ...thread, turn: post && !post.deleted ? post : null }
+  }))
+}
+
 const isOpen = (status: string | undefined) => status === undefined || status === 'open' || status === 'blocked'
 
 /**
@@ -110,7 +123,7 @@ const reads: Record<string, (port: BoardPort, query: URLSearchParams) => Promise
     const answeredIds = new Set(answered.map(({ message }) => message.id))
     // A candidate's own snapshot can say `ask=answered` too, when it was resolved before the second read.
     const open = candidates.filter(({ message }) => message.labels.ask !== 'answered' && !answeredIds.has(message.id))
-    return [200, { open, answered }]
+    return [200, { open: await withTurn(port, open), answered: await withTurn(port, answered) }]
   },
   // The project channels: every allowlisted repo a todo or work item names.
   async channels(port) {

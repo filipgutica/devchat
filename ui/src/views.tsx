@@ -7,7 +7,6 @@ import { channelName } from './format.ts'
 import { MessageStream } from './message.tsx'
 import { routeHref, type Route, type View } from './route.ts'
 import { byTime, threadItem, type RowMode } from './rows.tsx'
-import { useWrite } from './use-write.ts'
 
 type Shared = {
   route: Route
@@ -65,8 +64,6 @@ export function ChannelView({ view, threads, offline, onSaved, ...shared }: Chan
   const { navigate, route, repos } = shared
   const name = channelName(view.repo, repos)
   const body = useRef<HTMLDivElement>(null)
-  const create = useWrite(() => onSaved('Saved to the board'))
-  const noun = view.tab === 'todos' ? 'todo' : 'work item'
   const setView = (change: Partial<typeof view>) => navigate({ view: { ...view, ...change }, thread: route.thread })
 
   // A conversation reads from the bottom: show the newest items, next to the composer.
@@ -74,9 +71,6 @@ export function ChannelView({ view, threads, offline, onSaved, ...shared }: Chan
     if (body.current) body.current.scrollTop = body.current.scrollHeight
   }, [threads?.length, view.tab, view.resolved])
 
-  async function onCreate(text: string) {
-    return create.send({ kind: view.tab === 'todos' ? 'todo' : 'work', text, ...(view.repo ? { repo: view.repo } : {}) })
-  }
 
   const list = (tab: Tab) => tab !== view.tab ? null : !threads ? <p className="quiet">Loading…</p>
     : threads.length === 0 ? <p className="quiet">No {view.resolved ? 'resolved' : 'open'} {tab === 'todos' ? 'todos' : 'work items'} in {name}.</p>
@@ -101,9 +95,27 @@ export function ChannelView({ view, threads, offline, onSaved, ...shared }: Chan
         <TabsPanel value="work">{list('work')}</TabsPanel>
       </div>
       <div className="view-foot">
-        <Composer key={`${name}:${view.tab}`} label={`New ${noun} in ${name}`} offline={offline} write={create} onSend={onCreate} />
+        {/* One composer per tab, both kept mounted: each holds its own draft and unconfirmed write. */}
+        {(['todos', 'work'] as const).map((tab) => (
+          <div key={`${name}:${tab}`} hidden={tab !== view.tab}>
+            <Composer label={`New ${tab === 'todos' ? 'todo' : 'work item'} in ${name}`} offline={offline} onSaved={() => onSaved('Saved to the board')}
+              toDraft={(text) => ({ kind: tab === 'todos' ? 'todo' : 'work', text, ...(view.repo ? { repo: view.repo } : {}) })} />
+          </div>
+        ))}
       </div>
     </Tabs>
+  )
+}
+
+/** A link this page can't read. */
+export function NotFoundView() {
+  return (
+    <>
+      <header className="toolbar"><h1>Not found</h1></header>
+      <div className="view-body">
+        <p className="quiet">This link doesn't name a devchat view. <a href={routeHref({ view: { kind: 'needs-you' }, thread: null })}>Go to Needs you</a></p>
+      </div>
+    </>
   )
 }
 

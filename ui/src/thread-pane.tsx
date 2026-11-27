@@ -1,7 +1,8 @@
 import { Button } from '@ui-sdk/react/button'
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react'
 import type { Message, Thread } from './api.ts'
-import { Composer } from './composer.tsx'
+import { Composer, type Question } from './composer.tsx'
+import { ThreadRefs } from './refs.tsx'
 import { byOf, channelName, replyCount } from './format.ts'
 import { Icon } from './icons.tsx'
 import { MessageRow, MessageStream, type RowStatus } from './message.tsx'
@@ -81,11 +82,14 @@ function PaneResize({ width, onWidth }: { width: number; onWidth: (rem: number) 
  * what a reply does (§12, "Honest delivery text").
  */
 function composerWording({ root, replies }: Thread) {
-  const { ask, status } = root.labels
+  const { ask, status, turn } = root.labels
   const lastAgent = [root, ...replies].reverse().find((post) => byOf(post) !== 'user')
   const label = !lastAgent ? 'Reply in this thread' : ask === 'open' ? `Answer ${byOf(lastAgent)}` : `Reply to ${byOf(lastAgent)}`
   const hint = isResolved(status) ? 'A reply reopens the thread.' : ask === 'answered' ? 'Waiting for the agent.' : undefined
-  return { label, ...(hint ? { hint } : {}) }
+  // While a question waits, a reply answers it: `re` names the post `turn` names (§2, DC-40).
+  const asked = ask === 'open' && turn ? replies.find((reply) => reply.labels.rid === turn) : undefined
+  const question: Question | undefined = asked && turn ? { rid: turn, text: asked.text } : undefined
+  return { label, hint, question }
 }
 
 /**
@@ -98,7 +102,6 @@ export function ThreadPane({ rid, thread, repos, offline, onClose, onSaved }: Th
   const resolveButton = useRef<HTMLButtonElement>(null)
   const [width, setWidth] = useState(defaultWidth)
   const resolve = useWrite(() => onSaved('Thread resolved'))
-  const answer = useWrite(() => onSaved('Saved to the board'))
 
   // Opening a thread moves focus to the pane's heading.
   useEffect(() => heading.current?.focus(), [rid])
@@ -114,11 +117,6 @@ export function ThreadPane({ rid, thread, repos, offline, onClose, onSaved }: Th
     else resolveButton.current?.focus()
   }
 
-  async function onAnswer(text: string) {
-    // `re` names the question the pane showed, while it still waits (§2, DC-40).
-    const re = labels.ask === 'open' ? labels.turn : undefined
-    return answer.send({ kind: 'answer', root: rid, text, ...(re ? { re } : {}) })
-  }
 
   const replies = thread?.replies ?? []
 
@@ -149,7 +147,7 @@ export function ThreadPane({ rid, thread, repos, offline, onClose, onSaved }: Th
         {root && (
           <>
             <ol className="stream" aria-label="Thread root">
-              <MessageRow by={byOf(root)} at={root.createdAt}><p>{root.text}</p></MessageRow>
+              <MessageRow by={byOf(root)} at={root.createdAt}><p>{root.text}</p><ThreadRefs root={root} /></MessageRow>
             </ol>
             <p className="reply-count">{replies.length === 0 ? 'No replies' : replyCount(replies.length)}</p>
             <MessageStream label="Replies" since={root.createdAt} items={replies.map((reply) => {
@@ -169,7 +167,8 @@ export function ThreadPane({ rid, thread, repos, offline, onClose, onSaved }: Th
         )}
       </div>
       {thread?.root.channel === 'work' && (
-        <Composer {...composerWording(thread)} offline={offline} write={answer} onSend={onAnswer} />
+        <Composer {...composerWording(thread)} offline={offline} onSaved={() => onSaved('Saved to the board')}
+          toDraft={(text, re) => ({ kind: 'answer', root: rid, text, ...(re ? { re } : {}) })} />
       )}
     </aside>
   )

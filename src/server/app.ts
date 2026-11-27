@@ -1,8 +1,8 @@
 import { board, BoardError, type Board } from '@vercel/board'
-import { readdirSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { readdirSync, realpathSync, type Dirent } from 'node:fs'
+import { readFile, realpath } from 'node:fs/promises'
 import { createServer, type ServerResponse } from 'node:http'
-import { extname, join, sep } from 'node:path'
+import { extname, join, relative, sep } from 'node:path'
 import { boardMarker } from '../shared/layout.ts'
 import { createBoardPort } from './board-port.ts'
 import { createUiRoute, type UiRouteOptions } from './ui-route.ts'
@@ -46,32 +46,44 @@ const shellPolicy = [
   "font-src 'self'", "connect-src 'self'", "object-src 'none'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
 ].join('; ')
 
+/** The build directory, resolved, and its files by URL path. */
+type Shell = { root: string; files: Map<string, string> }
+
 /**
- * The built web UI's files, by URL path, listed once at start. A request names a file in this map
- * or none: no URL is joined into a path. A missing directory serves no shell.
+ * The built web UI's regular files, by URL path, listed once at start, without symlinks or dot-named
+ * paths. A request names a file in this map or none: no URL is joined into a path. A missing
+ * directory serves no shell.
  */
-function listShell(dir: string) {
-  const files = new Map<string, string>()
-  let names: string[]
+function listShell(dir: string): Shell {
+  let root: string
+  let entries: Dirent[]
   try {
-    names = readdirSync(dir, { recursive: true, encoding: 'utf8' })
+    root = realpathSync(dir)
+    entries = readdirSync(root, { recursive: true, withFileTypes: true })
   } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return files
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return { root: dir, files: new Map() }
     throw error
   }
-  for (const name of names) {
-    if (Object.hasOwn(shellTypes, extname(name))) files.set(`/${name.split(sep).join('/')}`, join(dir, name))
+  const files = new Map<string, string>()
+  for (const entry of entries) {
+    // A symlink is not a regular file here, and nothing under a dot-named folder is listed.
+    const name = relative(root, join(entry.parentPath, entry.name))
+    if (!entry.isFile() || name.split(sep).some((part) => part.startsWith('.'))) continue
+    if (Object.hasOwn(shellTypes, extname(name))) files.set(`/${name.split(sep).join('/')}`, join(root, name))
   }
-  return files
+  return { root, files }
 }
 
 /** Answers a GET or HEAD for one of the shell's files: `/` is `index.html`, and `assets/` holds hashed names. */
-async function serveShell(files: Map<string, string>, path: string, method: string | undefined, response: ServerResponse) {
+async function serveShell({ root, files }: Shell, path: string, method: string | undefined, response: ServerResponse) {
   const urlPath = path === '/' ? '/index.html' : path
   const file = files.get(urlPath)
   if (!file) return void response.writeHead(404).end()
   if (method !== 'GET' && method !== 'HEAD') return void response.writeHead(405, { Allow: 'GET, HEAD' }).end()
-  const body = await readFile(file)
+  // The build can change after the listing: serve only a file that still resolves inside the build.
+  const real = await realpath(file).catch(() => null)
+  if (real === null || !real.startsWith(root + sep)) return void response.writeHead(404).end()
+  const body = await readFile(real)
   response.writeHead(200, {
     'Content-Type': shellTypes[extname(file)],
     'Content-Length': body.length,
@@ -99,7 +111,7 @@ type AppOptions = {
  */
 export function createApp({ version, openBoard = () => board(), writerStats, ui, shell }: AppOptions) {
   const uiRoute = ui && createUiRoute({ ...ui, openBoard })
-  const shellFiles = shell === undefined ? new Map<string, string>() : listShell(shell)
+  const shellFiles: Shell = shell === undefined ? { root: '', files: new Map() } : listShell(shell)
   return createServer((request, response) => {
     const url = new URL(request.url ?? '/', 'http://app.invalid')
     if (uiRoute && url.pathname.startsWith('/api/ui/')) {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -80,4 +80,38 @@ test('The app serves the built shell at / and its listed files, and nothing outs
   await once(bare, 'listening')
   t.after(() => bare.close())
   assert.equal((await fetch(`http://127.0.0.1:${(bare.address() as AddressInfo).port}/`)).status, 404)
+})
+
+test('The shell serves no symlink, nothing dot-named, and no file that moved out of the build since it started', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'devchat-shell-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const build = join(dir, 'build')
+  const outside = join(dir, 'outside')
+  await mkdir(join(build, 'assets'), { recursive: true })
+  await mkdir(join(build, '.cache'))
+  await mkdir(outside)
+  await writeFile(join(outside, 'secret.js'), 'secret')
+  await writeFile(join(build, 'index.html'), '<!doctype html>')
+  await writeFile(join(build, 'assets', 'late.js'), 'in the build')
+  await writeFile(join(build, '.env.js'), 'dotfile')
+  await writeFile(join(build, '.cache', 'old.js'), 'dot folder')
+  await symlink(join(outside, 'secret.js'), join(build, 'assets', 'linked.js'))
+  await symlink(outside, join(build, 'assets', 'folder'))
+
+  const app = createApp({ version: '0.0.0', shell: build })
+  app.listen(0, '127.0.0.1')
+  await once(app, 'listening')
+  t.after(() => app.close())
+  const url = `http://127.0.0.1:${(app.address() as AddressInfo).port}`
+
+  assert.equal((await fetch(`${url}/assets/late.js`)).status, 200)
+  for (const path of ['/assets/linked.js', '/assets/folder/secret.js', '/.env.js', '/.cache/old.js']) {
+    assert.equal((await fetch(`${url}${path}`)).status, 404, path)
+  }
+  // A listed file that becomes a symlink out of the build is not read.
+  await rm(join(build, 'assets', 'late.js'))
+  await symlink(join(outside, 'secret.js'), join(build, 'assets', 'late.js'))
+  const moved = await fetch(`${url}/assets/late.js`)
+  assert.equal(moved.status, 404)
+  assert.notEqual(await moved.text(), 'secret')
 })
