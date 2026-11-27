@@ -54,5 +54,39 @@
         "rootLabels": { "rid": "todo-1", "by": "agent", "status": "dropped" }
       }
     ]
+  },
+  {
+    "name": "pending guard on questions, a resolve with nothing pending, and a reopening note",
+    "channel": "work",
+    "steps": [
+      {
+        "post": { "text": "Ship the import.", "labels": { "rid": "work-2", "by": "agent", "repo": "example/project" } },
+        "rootLabels": { "rid": "work-2", "by": "agent", "repo": "example/project", "status": "open" }
+      },
+      {
+        "post": { "text": "Which format?", "labels": { "rid": "ask-3", "by": "agent", "kind": "ask" } },
+        "rootLabels": { "rid": "work-2", "by": "agent", "repo": "example/project", "status": "open", "ask": "open", "turn": "ask-3" }
+      },
+      {
+        "post": { "text": "Use CSV.", "labels": { "rid": "answer-3", "by": "user", "kind": "answer", "re": "ask-3" } },
+        "rootLabels": { "rid": "work-2", "by": "agent", "repo": "example/project", "status": "open", "ask": "answered", "turn": "answer-3" }
+      },
+      {
+        "post": { "text": "A question from before the answer.", "labels": { "rid": "ask-4", "by": "agent", "kind": "ask", "block": "1" } },
+        "rootLabels": { "rid": "work-2", "by": "agent", "repo": "example/project", "status": "open", "ask": "answered", "turn": "answer-3" }
+      },
+      {
+        "post": { "text": "CSV with headers?", "labels": { "rid": "ask-5", "by": "agent", "kind": "ask", "block": "1", "re": "answer-3" } },
+        "rootLabels": { "rid": "work-2", "by": "agent", "repo": "example/project", "status": "blocked", "ask": "open", "turn": "ask-5" }
+      },
+      {
+        "post": { "text": "Resolved.", "labels": { "rid": "done-2", "by": "agent", "kind": "done" } },
+        "rootLabels": { "rid": "work-2", "by": "agent", "repo": "example/project", "status": "done" }
+      },
+      {
+        "post": { "text": "Found one more file.", "labels": { "rid": "note-4", "by": "agent", "kind": "note" } },
+        "rootLabels": { "rid": "work-2", "by": "agent", "repo": "example/project", "status": "open" }
+      }
+    ]
   }
 ]

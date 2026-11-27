@@ -15,6 +15,13 @@ export const channels = {
 /** The board marker in `sys`, posted once by host setup with `epoch=1`. */
 export const boardMarker = { id: 'board', channel: channels.sys } as const
 
+/** The app marker in `inbox`: its `applied` label is the message ID of the last `inbox` post the app handled. */
+export const appMarker = { id: 'app', channel: channels.inbox } as const
+
+/** The values of `refused` on an `inbox` post the app rejected; docs/layout.md says what each means. */
+export const refusalReasons = ['reply', 'json', 'deferred', 'invalid', 'repo', 'root', 'profile', 'pr', 'pending'] as const
+export type RefusalReason = typeof refusalReasons[number]
+
 export const labelKeys = [
   'rid', 'status', 'host', 'repo', 'work', 'kind', 'issue', 'machine', 'env',
   'thread', 'ask', 'turn', 'pushed', 'by', 'fwd', 'dest', 'every', 'last', 'src',

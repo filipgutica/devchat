@@ -37,6 +37,29 @@ A `rid` uses letters, digits, and `.`, `_`, `:`, `-`, at most 196 characters (Bo
 
 Release 1 refuses `msg`, `queue`, `ack`, and reactions (`react`). The app writes user answers with `by=user` and `kind=answer`.
 
+## Ingest
+
+The app's state writer reads `inbox` in log order from the app marker's `applied` label, every 15 s. For each intent it writes the canonical post, or sets `refused=<reason>` on the intent's `inbox` post and writes nothing. Before it validates an intent, it looks for `app:<rid>`: an intent with a canonical post was already applied, and a replay only folds that post's thread again.
+
+- A new root carries `rid`, `by`, and the routing labels `repo`, `machine`, `env`, and `thread`, set once; a work item also carries `issue`. The app sets `env` from the host's machine map (`devchat-host install --machine <name>=<T3 environment ID>`) and leaves it unset for a machine the map does not name.
+- A reply carries `rid`, `by`, `kind`, and the applicable `re`, `block=1`, or `pr.<n>`, where `<n>` is the number at the end of the `pr` URL's `/pull/<n>` path.
+- After each post, the app folds the thread from its root and writes `status`, `ask`, `turn`, and `pr.<n>` on the root.
+- After each page of `inbox` posts, the app sets `applied` on its marker to the message ID of the last post in the page: a decided intent, a refused one, or the marker itself. Every intent up to `applied` has its canonical post and root labels, or `refused`.
+
+| `refused` | Why |
+| --- | --- |
+| `reply` | The post is a reply; an intent is a root. |
+| `json` | The text is not JSON. |
+| `deferred` | `kind` is `msg`, `queue`, `ack`, or `react`, which arrive in release 2. |
+| `invalid` | The intent does not match the release 1 schema: for example `kind=answer`, `by=user`, or a state field such as `status`. |
+| `repo` | `repo` is not `<owner>/<repo>` with its owner on the host allowlist (`devchat-host install --allowlist <owner,...>`). An empty allowlist refuses every `repo`. |
+| `root` | No todo, work, or message root has the `rid` that `root` names. |
+| `profile` | A reply in `msg` comes from a profile other than `coordinator`. |
+| `pr` | The `pr` URL is longer than 256 characters, or does not end in `/pull/<n>`. |
+| `pending` | A resolve while a user reply is pending, without `re` naming it (`turn`). |
+
+The package root exports these reasons as `refusalReasons`.
+
 ```json
 {"v":1,"rid":"ask-1","kind":"ask","root":"work-1","text":"Can we proceed?","by":"agent","block":1}
 ```
@@ -46,7 +69,7 @@ Release 1 refuses `msg`, `queue`, `ack`, and reactions (`react`). The app writes
 - `@filipgutica/devchat/fixtures/guard.json` contains cases with `name`, `text`, and two expectations: `general`, for the guard every new text passes (Field Guide's new-text patterns), and `workLane`, for the stricter work-lane guard of release 3, which also refuses URLs, file paths, code spans, and ticket keys. The fixture contains synthetic input.
 - `@filipgutica/devchat/fixtures/fold.json` contains cases with `name`, `channel`, and ordered `steps`. Each step has a canonical `post` with `text` and Board `labels`. The first post is the root and later posts are replies to it. After each post, compare the full root label map against `rootLabels`. A key absent from that map must be unset.
 
-An agent note opens a thread and clears `ask` and `turn`. An agent question opens an ask and points `turn` at the question. With `block=1`, it sets `status=blocked`. A user reply sets `ask=answered` and points `turn` at the reply. While that answer is pending, an agent note or question changes the root only when its `re` equals `turn`. A resolve also needs that reference while an answer is pending.
+An agent note opens a thread and clears `ask` and `turn`. An agent question opens an ask and points `turn` at the question. With `block=1`, it sets `status=blocked`. A user reply sets `ask=answered` and points `turn` at the reply; it leaves `status` as it is, unless the thread is resolved. While that answer is pending, an agent note or question changes the root only when its `re` equals `turn`. A resolve also needs that reference while an answer is pending.
 
 A resolve clears `ask` and `turn` and sets `status` to `done` or `dropped`. The next note, question, or user reply reopens the thread before the app applies that post's state changes.
 
