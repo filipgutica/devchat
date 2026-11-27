@@ -148,3 +148,24 @@ export async function setupBoard(handle: Board, login: string, log: Log) {
   await explainGrants(handle, login, log)
   await ensureBoardMarker(handle, log)
 }
+
+const groupKinds = new Set(['all-users', 'all-projects', 'all-apps'])
+
+/**
+ * Why a board is not locked, if it is not: a locked board names no group (Board's defaults
+ * g1–g3 do) and gives `everyone` nothing anywhere. Only then may it serve the tailnet.
+ */
+export function lockProblems(grants: readonly GrantView[]) {
+  const problems: string[] = []
+  for (const { id, principals, can } of grants) {
+    if (principals.some(({ kind }) => groupKinds.has(kind))) problems.push(`${id} names a group`)
+    if (principals.some(({ kind }) => kind === 'everyone')
+      && Object.values(can).some((permissions) => permissions === 'all' || permissions.length > 0)) {
+      problems.push(`${id} gives everyone access`)
+    }
+  }
+  if (!grants.some((grant) => grantKey(grant) === 'everyone *=')) {
+    problems.push("no grant gives everyone nothing at '*'")
+  }
+  return problems
+}

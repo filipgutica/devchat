@@ -11,8 +11,14 @@ export function exportsToPrune(names: readonly string[], keep = exportsKept) {
   return ours.slice(0, Math.max(0, ours.length - keep))
 }
 
+/**
+ * Every post on the board, keyed by its `rid`; a post without one (an intent, a marker) by its
+ * Board ID, as `#<id>`. A Map, so a key such as `__proto__` is data. A second post with a `rid` already seen
+ * is kept under its Board ID and listed in `duplicates`: an export loses nothing.
+ */
 async function readAll(handle: Board) {
-  const records: Record<string, MessageView> = {}
+  const records = new Map<string, MessageView>()
+  const duplicates: { rid: string; id: string }[] = []
   let channelsAfter: string | undefined
   do {
     const page = await handle.channels(channelsAfter === undefined ? {} : { after: channelsAfter })
@@ -22,24 +28,30 @@ async function readAll(handle: Board) {
         const { messages } = await handle.channel(path).messages({ limit: 500, ...(after === undefined ? {} : { after }) })
         const last = messages.at(-1)
         if (!last) break
-        // A devchat record is keyed by its rid; a post without one (an intent, a marker) by its Board ID.
-        for (const message of messages) records[message.labels.rid ?? `board:${message.id}`] = message
+        for (const message of messages) {
+          const rid = message.labels.rid
+          if (rid !== undefined && records.has(rid)) duplicates.push({ rid, id: message.id })
+          // `#` never appears in a rid, so a Board ID key cannot collide with one.
+          records.set(rid === undefined || records.has(rid) ? `#${message.id}` : rid, message)
+        }
         after = last.id
       }
     }
     channelsAfter = page.next ?? undefined
   } while (channelsAfter !== undefined)
-  return records
+  return { records, duplicates }
 }
 
 /** Writes every channel's posts as JSON keyed by `rid` to `dir`, then keeps the newest 14 files. */
 export async function exportBoard(handle: Board, dir: string, now = new Date()) {
-  const records = await readAll(handle)
+  const { records, duplicates } = await readAll(handle)
   const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')
   const file = join(dir, `devchat-${stamp}.json`)
-  await writeFile(`${file}.tmp`, JSON.stringify({ exportedAt: now.toISOString(), records }, null, 2), { mode: 0o600 })
+  // Object.fromEntries defines each key as an own property, `__proto__` included.
+  const document = { exportedAt: now.toISOString(), records: Object.fromEntries(records), duplicates }
+  await writeFile(`${file}.tmp`, JSON.stringify(document, null, 2), { mode: 0o600 })
   await rename(`${file}.tmp`, file)
   const pruned = exportsToPrune(await readdir(dir))
   await Promise.all(pruned.map((name) => rm(join(dir, name))))
-  return { file, records: Object.keys(records).length, pruned }
+  return { file, records: records.size, duplicates: duplicates.length, pruned }
 }

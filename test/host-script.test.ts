@@ -6,14 +6,19 @@ import type { Settings } from '../src/host/settings.ts'
 import { renderUnits } from '../src/host/units.ts'
 
 const settings: Settings = { login: 'user@example.com', host: 'host.example.ts.net', httpsPort: 8443, boardPort: 4100, appPort: 4101 }
-const sources = { nodeSource: '/home/user/.nvm/versions/node/v24.0.0/bin/node', modulesSource: "/tmp/it's here/node_modules" }
+const sources = {
+  nodeSource: '/home/user/.nvm/versions/node/v24.0.0/bin/node',
+  modulesSource: "/tmp/it's here/node_modules",
+  sourceUid: 1000,
+  sourceGid: 1000,
+}
 
 const bash = (script: string, input = '') => spawnSync('bash', ['-c', script], { input, encoding: 'utf8' })
 
 test('install closes the default grants before the board serves the tailnet, and exposes last', () => {
   const steps = installSteps({ settings, ...sources, expose: true })
   const index = (pattern: RegExp) => steps.findIndex(({ title }) => pattern.test(title))
-  const lock = index(/revoke Board's default grants/)
+  const lock = index(/lock it, on loopback only/)
   const boardStart = index(/^Start devchat-board/)
   const grants = index(/the tailnet login's grant/)
   assert.ok(lock > 0 && lock < boardStart && boardStart < grants && grants < index(/^Start devchat-app/))
@@ -26,11 +31,45 @@ test('install closes the default grants before the board serves the tailnet, and
   const serves = (steps[lock]?.bash ?? '').split('\n').filter((line) => line.includes('cli.mjs serve'))
   assert.equal(serves.length, 2)
   for (const line of serves) assert.doesNotMatch(line, /--tailscale/)
-  assert.match(steps[lock]?.bash ?? '', /board_setup --lock/)
+  assert.match(steps[lock]?.bash ?? '', /board_setup --lock\b/)
+  // A running board that is not locked loses its tailnet routes and stops before any restart.
+  assert.match(steps[lock]?.bash ?? '', /board_setup --lock-check[\s\S]*serve_plan --remove[\s\S]*systemctl stop devchat-board/)
+})
+
+test('install checks every destination before its first write, and stages only in its own directory', () => {
+  const script = renderScript(installSteps({ settings, ...sources, expose: true }))
+  const firstWrite = script.indexOf('ensure_dir /opt/devchat root')
+  for (const path of ['/opt/devchat', '/opt/devchat/app', '/etc/devchat/app.json', '/etc/systemd/system/devchat-board.service']) {
+    const check = script.indexOf(`safe_path ${path}\n`)
+    assert.ok(check > 0 && check < firstWrite, path)
+  }
+  assert.ok(script.indexOf('safe_path /var/lib/devchat/config /var/lib/devchat devchat') < firstWrite)
+  assert.match(script, /^unset TMPDIR$/m)
+  assert.doesNotMatch(script.replaceAll('mktemp -p "$STAGE"', ''), /\bmktemp\b|\bcp -R/)
+  // Root reads the sources as their owner and checks the staged snapshot, never the source.
+  assert.match(script, /"\$\{AS_SOURCE\[@\]\}" cat "\$NODE_SRC" > "\$staged"/)
+  assert.match(script, /"\$\{AS_SOURCE\[@\]\}" tar -C "\$MODULES_SRC" --exclude=\.bin -cf - \./)
+  assert.match(script, /find "\$STAGE\/app" ! -type f ! -type d -print -quit/)
+  assert.match(script, /ldd "\$staged"/)
+})
+
+test('safe_path refuses a symlink and a world-writable directory on the path', (t) => {
+  // A sandbox that maps root to another user shows system files as someone else's.
+  if (bash('stat -c %U /usr/bin').stdout.trim() !== 'root') return t.skip('/usr/bin is not root-owned here')
+  const safePath = (path: string) => bash(renderScript([{ title: 'path', bash: `safe_path ${path}` }]))
+  assert.equal(safePath('/usr/bin/env').status, 0)
+  assert.equal(safePath('/usr/bin/devchat-missing/x').status, 0)
+  const tmp = safePath('/tmp/devchat-x')
+  assert.equal(tmp.status, 1)
+  assert.match(tmp.stderr, /\/tmp is group- or world-writable/)
+  const link = bash('ls -ld /bin').stdout.startsWith('l') ? safePath('/bin/sh') : undefined
+  if (link) assert.match(link.stderr, /\/bin is a symlink/)
 })
 
 test('--no-expose leaves tailscale out of install, and uninstall keeps data unless --purge', () => {
-  assert.doesNotMatch(renderScript(installSteps({ settings, ...sources, expose: false })), /tailscale serve/)
+  const local = installSteps({ settings, ...sources, expose: false })
+  assert.ok(!local.some(({ title }) => /expose/.test(title)))
+  assert.doesNotMatch(renderScript(local), /^plan=\$\(serve_plan\)/m)
   const kept = renderScript(uninstallSteps({ httpsPort: 8443, expose: true, purge: false }))
   assert.match(kept, /tailscale serve --https=8443 off/)
   assert.doesNotMatch(kept, /userdel|rm -rf \/var\/lib\/devchat/)

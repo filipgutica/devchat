@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { board, type Board } from '@vercel/board'
 import { spawnSync } from 'node:child_process'
-import { realpathSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
 import { basename, dirname } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -9,7 +9,8 @@ import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import { z } from 'zod'
 import { exportBoard } from './export.ts'
-import { lockBoard, setupBoard } from './grants.ts'
+import { lockBoard, lockProblems, setupBoard } from './grants.ts'
+import { parseServeStatus, planServe } from './serve.ts'
 import { installSteps, renderPlan, renderScript, uninstallSteps, type Step } from './script.ts'
 import { boardUrl, defaultPorts, hostPaths, readSettings, settingsSchema, unitNames, type Settings } from './settings.ts'
 import { verifyHost } from './verify.ts'
@@ -135,6 +136,8 @@ async function main(argv: string[]) {
         settings,
         nodeSource: realpathSync(values.node ?? process.execPath),
         modulesSource: installedModules(),
+        sourceUid: process.getuid?.() ?? 0,
+        sourceGid: process.getgid?.() ?? 0,
         expose,
       })
       const code = runAsRoot(steps, values['dry-run'] ?? false)
@@ -168,17 +171,31 @@ async function main(argv: string[]) {
     case 'export': {
       const { values } = parseArgs({ args: rest, options: { config: { type: 'string' }, dir: { type: 'string' } } })
       process.env.BOARD_URL = boardUrl(await readSettings(values.config))
-      const { file, records, pruned } = await exportBoard(board(), values.dir ?? hostPaths.exportDir)
-      console.log(`exported ${records} records to ${file}; removed ${pruned.length} old exports`)
+      const { file, records, duplicates, pruned } = await exportBoard(board(), values.dir ?? hostPaths.exportDir)
+      console.log(`exported ${records} records (${duplicates} with a repeated rid) to ${file}; removed ${pruned.length} old exports`)
       return 0
     }
-    // Internal: the install script runs this as the service account, through loopback.
+    // Internal: the install script runs these as the service account, through loopback.
     case 'board-setup': {
-      const { values } = parseArgs({ args: rest, options: { config: { type: 'string' }, wait: { type: 'string' }, lock: { type: 'boolean' } } })
+      const { values } = parseArgs({ args: rest, options: {
+        config: { type: 'string' }, wait: { type: 'string' }, lock: { type: 'boolean' }, 'lock-check': { type: 'boolean' },
+      } })
       const settings = await readSettings(values.config)
       process.env.BOARD_URL ??= boardUrl(settings)
       const handle = await openBoardWhenReady(Number(values.wait ?? 30))
+      if (values['lock-check']) {
+        const problems = lockProblems(await handle.grants())
+        for (const problem of problems) console.log(`not locked: ${problem}`)
+        return problems.length === 0 ? 0 : 1
+      }
       await (values.lock ? lockBoard : setupBoard)(handle, settings.login, (line) => console.log(line))
+      return 0
+    }
+    case 'serve-plan': {
+      const { values } = parseArgs({ args: rest, options: { config: { type: 'string' }, status: { type: 'string' }, remove: { type: 'boolean' } } })
+      if (values.status === undefined) throw new Error('serve-plan needs --status <file>')
+      const plan = planServe(parseServeStatus(readFileSync(values.status, 'utf8')), await readSettings(values.config), { remove: values.remove ?? false })
+      for (const line of plan) console.log(line)
       return 0
     }
     default:

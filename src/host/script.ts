@@ -7,7 +7,7 @@ export type Step = { title: string; bash: string }
 /** Quotes a value for Bash. */
 export const shq = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`
 
-const { account, stateDir, configHome, node, optDir, appDir, configDir, configFile, unitDir } = hostPaths
+const { account, stateDir, configHome, node, optDir, appDir, configDir, configFile, unitDir, stageDir } = hostPaths
 
 /**
  * Helpers every root script starts with. Each change prints `applied:` and each check that finds
@@ -15,7 +15,9 @@ const { account, stateDir, configHome, node, optDir, appDir, configDir, configFi
  */
 const prelude = String.raw`set -euo pipefail
 umask 022
-# The service account cannot enter the caller's working directory.
+# Nothing the caller's environment names is used: no TMPDIR, and the service account cannot enter
+# the caller's working directory.
+unset TMPDIR
 cd /
 APPLIED=0
 RESTART=0
@@ -25,7 +27,25 @@ applied() { printf '  applied: %s\n' "$1"; APPLIED=$((APPLIED + 1)); }
 unchanged() { printf '  unchanged: %s\n' "$1"; }
 run() { printf '  $ %s\n' "$*"; "$@"; }
 AS_DEVCHAT=(setpriv --reuid=${account} --regid=${account} --init-groups env -i HOME=${stateDir} XDG_CONFIG_HOME=${configHome} PATH=/usr/bin:/bin)
+STAGE=${stageDir}
 owner_mode() { stat -c '%U:%G:%a' "$1"; }
+# safe_path <path> [<owned-from> <owner>]: refuses a symlink, a group- or world-writable directory,
+# or a component not owned by root, anywhere on the path. Components at or below <owned-from> may
+# belong to <owner> instead. Missing components end the check: install creates them.
+safe_path() {
+  local path=$1 from=\${2:-} owner=\${3:-root} current='' part want
+  local -a parts
+  IFS=/ read -ra parts <<<"\${path#/}"
+  for part in "\${parts[@]}"; do
+    current="$current/$part"
+    if [ -L "$current" ]; then fail "$current is a symlink"; fi
+    [ -e "$current" ] || return 0
+    want=root
+    if [ -n "$from" ] && { [ "$current" = "$from" ] || [[ "$current" == "$from"/* ]]; }; then want=$owner; fi
+    [ "$(stat -c %U "$current")" = "$want" ] || fail "$current is not owned by $want"
+    if [ -d "$current" ] && [ -n "$(find "$current" -maxdepth 0 -perm /022)" ]; then fail "$current is group- or world-writable"; fi
+  done
+}
 ensure_dir() {
   if [ -d "$1" ] && [ "$(owner_mode "$1")" = "$2:$3:$4" ]; then unchanged "$1"
   else run install -d -o "$2" -g "$3" -m "$4" "$1"; applied "$1"; fi
@@ -33,7 +53,7 @@ ensure_dir() {
 # ensure_file <path> <owner> <group> <mode>, with the content on stdin. Sets FILE_CHANGED.
 ensure_file() {
   local tmp
-  tmp=$(mktemp)
+  tmp=$(mktemp -p "$STAGE")
   cat > "$tmp"
   FILE_CHANGED=0
   if [ -f "$1" ] && cmp -s "$tmp" "$1" && [ "$(owner_mode "$1")" = "$2:$3:$4" ]; then unchanged "$1"
@@ -49,7 +69,7 @@ foreign_libs() {
     NF > 0 { print }'
 }
 version_at_least() { printf '%s\n%s\n' "$2" "$1" | sort -V -C; }
-`
+`.replaceAll('\\${', '${') // String.raw keeps the backslash that stops interpolation.
 
 const ensureUnitActive = (unit: string) => `if systemctl is-enabled --quiet ${unit}; then unchanged "${unit} enabled"; else run systemctl enable ${unit}; applied "${unit} enabled"; fi
 if systemctl is-active --quiet ${unit}; then unchanged "${unit} running"; else run systemctl start ${unit}; applied "${unit} started"; fi`
@@ -60,32 +80,76 @@ export type InstallOptions = {
   nodeSource: string
   /** An npm `node_modules` holding `@filipgutica/devchat` and its dependencies. */
   modulesSource: string
+  /** The account that owns the sources: root reads them with that account's rights only. */
+  sourceUid: number
+  sourceGid: number
   expose: boolean
 }
 
+/** Every path install writes, checked before its first write. */
+const rootOwnedPaths = [
+  optDir, `${optDir}/bin`, node, appDir, `${appDir}.old`, stageDir, configDir, configFile,
+  ...Object.values(unitNames).map((name) => `${unitDir}/${name}`),
+]
+const accountOwnedPaths = [stateDir, configHome, hostPaths.exportDir]
+
 /** The root script `devchat-host install` runs with one `sudo` (runbook step 3). */
-export function installSteps({ settings, nodeSource, modulesSource, expose }: InstallOptions): Step[] {
+export function installSteps({ settings, nodeSource, modulesSource, sourceUid, sourceGid, expose }: InstallOptions): Step[] {
   const units = renderUnits(settings)
   const url = boardUrl(settings)
-  const setup = `"\${AS_DEVCHAT[@]}" BOARD_URL=${url} ${node} ${hostCli} board-setup --config ${configFile}`
+  const hostCliRun = `"\${AS_DEVCHAT[@]}" ${node} ${hostCli}`
+  const bootstrap = boardServeArgs(settings, { tailnet: false }).join(' ')
   const steps: Step[] = [
     {
-      title: 'Check the prerequisites',
+      title: 'Check the prerequisites and every path install writes',
       bash: `NODE_SRC=${shq(nodeSource)}
 MODULES_SRC=${shq(modulesSource)}
+# Root reads the sources with the rights of the account that owns them, so it follows nothing that
+# account could not read itself.
+AS_SOURCE=(setpriv --reuid=${sourceUid} --regid=${sourceGid} --clear-groups)
 [ "$(id -u)" = 0 ] || fail 'run as root'
-for tool in systemctl setpriv ldd install cmp diff; do command -v "$tool" >/dev/null || fail "missing $tool"; done
-${expose ? `command -v tailscale >/dev/null || fail 'missing tailscale'\n` : ''}[ -x "$NODE_SRC" ] || fail "no Node at $NODE_SRC"
+for tool in systemctl setpriv ldd install cmp diff tar find; do command -v "$tool" >/dev/null || fail "missing $tool"; done
+${expose ? `command -v tailscale >/dev/null || fail 'missing tailscale'\n` : ''}[ -f "$NODE_SRC" ] || fail "no Node at $NODE_SRC"
 [ -d "$MODULES_SRC/@filipgutica/devchat" ] && [ -d "$MODULES_SRC/@vercel/board" ] || fail "no installed package in $MODULES_SRC"
-# Install never changes /opt itself; the services must not run from a tree another account can swap.
-[ "$(stat -c %U /opt)" = root ] && [ -z "$(find /opt -maxdepth 0 -perm /022)" ] || fail '/opt must be root-owned and not group- or world-writable'
-unchanged 'prerequisites'
+# The services must not run from a tree another account can swap: /opt and every destination
+# are root-owned, not group- or world-writable, and not symlinks. Install never changes /opt itself.
+${rootOwnedPaths.map((path) => `safe_path ${path}`).join('\n')}
+${accountOwnedPaths.map((path) => `safe_path ${path} ${stateDir} ${account}`).join('\n')}
+unchanged 'prerequisites and destinations'
+ensure_dir ${optDir} root root 755
+# 711: the service account can run the staged Node by name, and list nothing.
+ensure_dir "$STAGE" root root 711
+find "$STAGE" -mindepth 1 -delete
 # Runs board setup as ${account} through loopback, and counts its changes.
 board_setup() {
   local out
-  out=$(${setup} "$@") || { printf '%s\\n' "$out"; return 1; }
+  out=$(${hostCliRun} board-setup --config ${configFile} "$@") || { printf '%s\\n' "$out" | sed 's/^/  /'; return 1; }
   printf '%s\\n' "$out" | sed 's/^/  /'
   APPLIED=$((APPLIED + $(printf '%s\\n' "$out" | grep -c '^applied:' || true)))
+}
+# Applies a serve plan from devchat-host serve-plan: lines of "unchanged", "off <port>", or "set".
+apply_serve_plan() {
+  local verb port
+  while read -r verb port; do
+    case "$verb" in
+      unchanged) unchanged "tailnet routes on :${settings.httpsPort}" ;;
+      off) [[ "$port" =~ ^[0-9]+$ ]] || fail "bad serve plan: off $port"
+        run tailscale serve --https="$port" off; applied "devchat's tailnet routes on :$port removed" ;;
+      set) run tailscale serve --bg --https=${settings.httpsPort} --set-path=/api/board ${url}
+        run tailscale serve --bg --https=${settings.httpsPort} --set-path=/ http://127.0.0.1:${settings.appPort}
+        applied "tailnet routes on :${settings.httpsPort}" ;;
+      '') ;;
+      *) fail "bad serve plan: $verb" ;;
+    esac
+  done <<<"$1"
+}
+# Plans the serve routes from tailscale's registered config, as ${account} on a root-written copy.
+serve_plan() {
+  local status
+  status=$(tailscale serve status --json) || fail 'tailscale serve status failed'
+  printf '%s\\n' "$status" > "$STAGE/serve.json"
+  chmod 644 "$STAGE/serve.json"
+  ${hostCliRun} serve-plan --config ${configFile} --status "$STAGE/serve.json" "$@"
 }`,
     },
     {
@@ -97,35 +161,38 @@ ensure_dir ${configHome} ${account} ${account} 700
 ensure_dir ${hostPaths.exportDir} ${account} ${account} 700`,
     },
     {
-      title: `Copy Node to ${node}, root-owned, after checking it links only system libraries`,
-      bash: `ensure_dir ${optDir} root root 755
-ensure_dir ${optDir}/bin root root 755
-staged=${node}.new
-install -o root -g root -m 755 "$NODE_SRC" "$staged"
-# ldd and the version check run as ${account}: root never executes the copied binary.
-libs=$("\${AS_DEVCHAT[@]}" ldd "$staged") || { rm -f "$staged"; fail 'ldd failed on the Node binary'; }
+      title: `Copy Node to ${node}, root-owned, after checking the copy links only system libraries`,
+      bash: `ensure_dir ${optDir}/bin root root 755
+staged="$STAGE/node"
+"\${AS_SOURCE[@]}" cat "$NODE_SRC" > "$staged"
+chmod 755 "$staged"
+# The checks read the staged copy, which nothing but root can change, and run as ${account}:
+# root never executes the copied binary.
+libs=$("\${AS_DEVCHAT[@]}" ldd "$staged") || fail 'ldd failed on the Node binary'
 foreign=$(printf '%s\\n' "$libs" | foreign_libs)
-[ -z "$foreign" ] || { rm -f "$staged"; fail "refusing $NODE_SRC: it links libraries outside the system library directories (a Linuxbrew build does):\\n$foreign"; }
+[ -z "$foreign" ] || fail "refusing $NODE_SRC: it links libraries outside the system library directories (a Linuxbrew build does):\\n$foreign"
 version=$("\${AS_DEVCHAT[@]}" "$staged" -p process.versions.node)
-version_at_least "$version" 22.20.0 || { rm -f "$staged"; fail "Node $version is too old: Board 0.56.1 writes need 22.20 or later"; }
+version_at_least "$version" 22.20.0 || fail "Node $version is too old: Board 0.56.1 writes need 22.20 or later"
 if [ -f ${node} ] && cmp -s "$staged" ${node} && [ "$(owner_mode ${node})" = root:root:755 ]; then rm -f "$staged"; unchanged "${node} (Node $version)"
 else run mv -f "$staged" ${node}; applied "${node} (Node $version)"; RESTART=1; fi`,
     },
     {
-      title: `Copy the server package to ${appDir}, root-owned and not group- or world-writable`,
-      bash: `rm -rf ${appDir}.new
-install -d -o root -g root -m 755 ${appDir}.new
-# -L copies files, never links back into the source tree.
-cp -RL "$MODULES_SRC" ${appDir}.new/node_modules
-chown -R root:root ${appDir}.new
-chmod -R u+rwX,go+rX,go-w ${appDir}.new
-if [ -d ${appDir} ] && diff -rq ${appDir}.new ${appDir} >/dev/null \\
-  && [ -z "$(find ${appDir} \\( ! -user root -o ! -group root -o -perm /022 \\) -print -quit)" ]; then
-  rm -rf ${appDir}.new; unchanged '${appDir}'
+      title: `Copy the server package to ${appDir}: regular files and directories only, root-owned, not group- or world-writable`,
+      bash: `install -d -o root -g root -m 700 "$STAGE/app" "$STAGE/app/node_modules"
+# tar stores links as links and follows none; .bin holds npm's command links, which the units do not use.
+"\${AS_SOURCE[@]}" tar -C "$MODULES_SRC" --exclude=.bin -cf - . \\
+  | tar -C "$STAGE/app/node_modules" --no-same-owner --no-same-permissions -xf -
+odd=$(find "$STAGE/app" ! -type f ! -type d -print -quit)
+[ -z "$odd" ] || fail "refusing the package: \${odd#"$STAGE/app/"} is not a regular file or directory"
+chown -R root:root "$STAGE/app"
+chmod -R u+rwX,go+rX,go-w,ug-s "$STAGE/app"
+if [ -d ${appDir} ] && diff -rq --no-dereference "$STAGE/app" ${appDir} >/dev/null \\
+  && [ -z "$(find ${appDir} \\( ! -user root -o ! -group root -o -perm /022 -o ! -type f ! -type d \\) -print -quit)" ]; then
+  rm -rf "$STAGE/app"; unchanged '${appDir}'
 else
   rm -rf ${appDir}.old
   if [ -d ${appDir} ]; then mv ${appDir} ${appDir}.old; fi
-  run mv ${appDir}.new ${appDir}; rm -rf ${appDir}.old; applied '${appDir}'; RESTART=1
+  run mv "$STAGE/app" ${appDir}; rm -rf ${appDir}.old; applied '${appDir}'; RESTART=1
 fi`,
     },
     {
@@ -145,14 +212,26 @@ if [ "$FILE_CHANGED" = 1 ]; then UNITS_CHANGED=1; fi`).join('\n')}
 if [ "$UNITS_CHANGED" = 1 ]; then run systemctl daemon-reload; RESTART=1; fi`,
     },
     {
-      title: `Before the board serves the tailnet: start it on loopback only and, as ${account}, revoke Board's default grants`,
-      bash: `if systemctl is-active --quiet ${unitNames.board}; then
-  unchanged '${unitNames.board} already runs; the next grant step checks every grant'
-else
-  # Board's default grant g1 lets a forged loopback tailnet header manage a board served with
-  # --tailscale, so the first start leaves it out until g1 is gone.
-  printf '  $ %s &\\n' ${shq(boardServeArgs(settings, { tailnet: false }).join(' '))}
-  "\${AS_DEVCHAT[@]}" ${boardServeArgs(settings, { tailnet: false }).join(' ')} >/dev/null 2>&1 &
+      title: `Before the board serves the tailnet with these units: lock it, on loopback only, as ${account}`,
+      bash: `# Board's default grant g1 lets a forged loopback tailnet header manage a board served with
+# --tailscale. A running board must already be locked; one that is not loses its tailnet routes and
+# is locked again on loopback only, before any restart with --tailscale.
+LOCK_ON_LOOPBACK=1
+if systemctl is-active --quiet ${unitNames.board}; then
+  if board_setup --lock-check; then
+    LOCK_ON_LOOPBACK=0
+  else
+    # With no tailscale, or tailscaled down, nothing serves the board on the tailnet.
+    if command -v tailscale >/dev/null && tailscale serve status >/dev/null 2>&1; then
+      plan=$(serve_plan --remove) || fail 'planning the tailnet routes failed'
+      apply_serve_plan "$plan"
+    fi
+    run systemctl stop ${unitNames.board}; applied 'stopped ${unitNames.board} and, through PartOf, ${unitNames.app}'
+  fi
+fi
+if [ "$LOCK_ON_LOOPBACK" = 1 ]; then
+  printf '  $ %s &\\n' ${shq(bootstrap)}
+  "\${AS_DEVCHAT[@]}" ${bootstrap} >/dev/null 2>&1 &
   BOOT_PID=$!
   trap 'kill "$BOOT_PID" 2>/dev/null || true' EXIT
   board_setup --lock || fail 'locking the board failed'
@@ -174,7 +253,7 @@ ${ensureUnitActive(unitNames.board)}`,
     {
       title: `Start ${unitNames.app}`,
       bash: `${ensureUnitActive(unitNames.app)}
-"\${AS_DEVCHAT[@]}" ${node} ${hostCli} status --app-port ${settings.appPort} --wait 30 | sed 's/^/  /'`,
+${hostCliRun} status --app-port ${settings.appPort} --wait 30 | sed 's/^/  /'`,
     },
     {
       title: `Install the daily export timer (${unitNames.exportTimer}, 14 files kept)`,
@@ -184,9 +263,10 @@ ${ensureUnitActive(unitNames.board)}`,
   if (expose) {
     steps.push({
       title: `Only now, expose both on the tailnet at https://${settings.host}:${settings.httpsPort}/`,
-      bash: `# tailscale serve replaces a route with the same one, so a rerun leaves it as it was.
-run tailscale serve --bg --https=${settings.httpsPort} --set-path=/api/board ${url}
-run tailscale serve --bg --https=${settings.httpsPort} --set-path=/ http://127.0.0.1:${settings.appPort}`,
+      bash: `# The plan compares tailscale's registered routes with these settings, and removes devchat's
+# routes on any other port.
+plan=$(serve_plan) || fail 'planning the tailnet routes failed'
+apply_serve_plan "$plan"`,
     })
   }
   return steps

@@ -10,6 +10,8 @@ export const hostPaths = {
   configHome: '/var/lib/devchat/config',
   boardDir: '/var/lib/devchat/board',
   exportDir: '/var/lib/devchat/exports',
+  /** Install's private staging directory: root-owned, never under a temp directory. */
+  stageDir: '/opt/devchat/.staging',
   optDir: '/opt/devchat',
   node: '/opt/devchat/bin/node',
   appDir: '/opt/devchat/app',
@@ -34,8 +36,10 @@ const port = z.number().int().min(1).max(65_535)
 
 /** The app's settings, written to `/etc/devchat/app.json` (root:devchat 640). */
 export const settingsSchema = z.object({
-  // Board keeps a tailnet login as an ID only in these characters; they are also shell-safe.
-  login: z.string().max(256).regex(/^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+$/, 'a tailnet login such as user@example.com'),
+  // Board lowercases a tailnet login and keeps it as an ID only in this shape (Board 0.56.1's LOGIN
+  // rule). Checking it here refuses a login before install writes anything; it is also shell-safe.
+  login: z.string().trim().toLowerCase()
+    .regex(/^[a-z0-9][a-z0-9._-]{0,63}@[a-z0-9][a-z0-9.-]{0,127}$/, 'a tailnet login such as user@example.com'),
   host: z.string().regex(/^[a-z0-9.-]+$/i, 'a DNS name such as <host>.<tailnet>.ts.net'),
   httpsPort: port,
   boardPort: port,
