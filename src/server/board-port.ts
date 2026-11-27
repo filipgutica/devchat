@@ -3,7 +3,7 @@ import type { Board, PostOptions } from '@vercel/board'
 type Post = Pick<PostOptions, 'text' | 'labels'> & { id: string }
 type MessagePageQuery = { after?: string; limit?: number }
 type ThreadsQuery = NonNullable<Parameters<Board['threads']>[0]>
-type ChannelThreadsQuery = Pick<ThreadsQuery, 'label' | 'before' | 'limit'>
+type ChannelThreadsQuery = Pick<ThreadsQuery, 'label' | 'text' | 'before' | 'limit'>
   & Required<Pick<ThreadsQuery, 'channel'>>
 
 export function createBoardPort(handle: Board) {

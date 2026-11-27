@@ -25,6 +25,9 @@ const isViewChannel = (value: string | null): value is ViewChannel => viewChanne
 const refusalStatus: Record<UserWriteRefusal, number> = { repo: 400, root: 404, re: 400, invalid: 400, conflict: 409 }
 const maxBody = 64 * 1024
 const openPageSize = 50
+/** Search returns at most this many threads from each view channel, newest activity first. */
+const searchLimit = 50
+const maxQuery = 200
 
 const json = (response: ServerResponse, status: number, body: unknown) => void response
   .writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
@@ -126,6 +129,20 @@ const reads: Record<string, (port: BoardPort, query: URLSearchParams) => Promise
       return [200, { threads: page.threads.filter(isLive), older: page.older ?? null }]
     }
     return [200, await openThreads(port, { channel, repo, before })]
+  },
+  // Search (§12): the board's text filter over a view channel's threads, open and resolved alike,
+  // or over both view channels without `channel`. It matches a thread's root or its replies.
+  async search(port, query) {
+    const q = query.get('q')?.trim() ?? ''
+    if (q.length === 0 || q.length > maxQuery) return [400, { error: `q must be 1 to ${maxQuery} characters` }]
+    const channel = query.get('channel')
+    if (channel !== null && !isViewChannel(channel)) return [400, { error: 'channel must be todos or work' }]
+    const threads = []
+    for (const one of channel === null ? viewChannels : [channel]) {
+      const page = await port.threads({ channel: one, text: q, limit: searchLimit })
+      threads.push(...page.threads.filter(isLive))
+    }
+    return [200, { threads }]
   },
   // One thread by its root's rid, with every reply.
   async thread(port, query) {
