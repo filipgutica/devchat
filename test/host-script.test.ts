@@ -30,13 +30,13 @@ test('install closes the default grants before the board serves the tailnet, and
   assert.match(plan, /^1\. Check the prerequisites/)
   assert.match(plan, new RegExp(`${steps.length}\\. Only now, expose both on the tailnet at https://host\\.example\\.ts\\.net:8443/$`))
 
-  // The first start serves loopback only; --tailscale arrives with the unit, after the lock.
+  // The lock runs on loopback only, on a port no route points to; --tailscale arrives with the unit.
   const serves = (steps[lock]?.bash ?? '').split('\n').filter((line) => line.includes('cli.mjs serve'))
   assert.equal(serves.length, 2)
-  for (const line of serves) assert.doesNotMatch(line, /--tailscale/)
-  assert.match(steps[lock]?.bash ?? '', /board_setup --lock\b/)
-  // A running board that is not locked stops at once, then loses its tailnet routes, then is relocked.
-  assert.match(steps[lock]?.bash ?? '', /board_setup --lock-check[\s\S]*systemctl stop devchat-export\.timer devchat-board\.service[\s\S]*remove_routes \|\| fail[\s\S]*board_setup --lock\b/)
+  for (const line of serves) assert.match(line, /serve --port 14100 .*--no-inspect'?( >\/dev\/null 2>&1 &)?$/)
+  // A board that is not running locked stops, confirmed, before the lock; no route is touched.
+  assert.match(steps[lock]?.bash ?? '', /board_setup --lock-check[\s\S]*stop_board \|\| fail[\s\S]*board_setup --lock --board-port 14100/)
+  assert.doesNotMatch(steps[lock]?.bash ?? '', /apply_serve_plan|serve_plan/)
 })
 
 test('install checks every destination before its first write, and stages only in its own directory', () => {
@@ -77,8 +77,10 @@ test('--no-expose leaves tailscale out of install, and uninstall keeps data unle
   assert.ok(!local.some(({ title }) => /expose/.test(title)))
   assert.doesNotMatch(renderScript(local), /^plan=\$\(serve_plan\)/m)
   const kept = renderScript(uninstallSteps({ expose: true, purge: false }))
-  // Uninstall removes devchat's mounts as planned from the recorded routes, never a whole port.
-  assert.match(kept, /remove_routes \|\| fail/)
+  // Uninstall removes devchat's mounts as planned from the recorded routes, never a whole port, and
+  // forgets the record only once a fresh plan finds none left.
+  assert.match(kept, /\[ -z "\$plan" \] \\\n\s+&& run rm -f \/etc\/devchat\/routes\.json/)
+  assert.match(kept, /if \[ -e \/etc\/devchat\/routes\.json \]; then\n  run rm -f \/etc\/devchat\/app\.json/)
   assert.doesNotMatch(kept, /tailscale serve --https=\S+ off/)
   assert.doesNotMatch(kept, /userdel|rm -rf \/var\/lib\/devchat/)
   assert.match(renderScript(uninstallSteps({ expose: false, purge: true })), /userdel devchat/)
@@ -141,27 +143,43 @@ function runStep(pattern: RegExp, stubs: string) {
   }
 }
 
-test('a board that is not locked stays stopped, and is not relocked, when its routes cannot be confirmed gone', () => {
-  const result = runStep(/lock it, on loopback only/, `
-systemctl() { [ "$1" = is-active ] || echo "systemctl $*"; }
+/** systemctl stubs: the board runs, and `systemctl show` reports `state` for every unit. */
+const systemctl = (state: string) => `systemctl() { case "$1" in is-active) return 0 ;; show) echo ${state} ;; *) echo "systemctl $*" ;; esac; }`
+
+test('a board that is not locked stops, confirmed, and is locked on loopback without touching any route', () => {
+  const relock = (state: string, tailscale: string) => runStep(/lock it, on loopback only/, `
+${systemctl(state)}
 board_setup() { echo "board_setup $*"; [ "$1" != --lock-check ]; }
-tailscale() { return 1; }`)
-  assert.equal(result.status, 1)
-  assert.match(result.stdout, /systemctl stop devchat-export\.timer devchat-board\.service/)
-  assert.match(result.stderr, /tailscale serve status failed[\s\S]*could not be confirmed: it stays stopped/)
-  assert.doesNotMatch(result.stdout, /board_setup --lock$|cli\.mjs serve|systemctl (start|restart)/m)
+tailscale() { ${tailscale}; }`)
+  // tailscale serve status fails: the board stays stopped, and install fails without a relock.
+  const noStatus = relock('inactive', 'return 1')
+  assert.equal(noStatus.status, 1)
+  assert.match(noStatus.stdout, /systemctl stop devchat-export\.timer devchat-board\.service[\s\S]*confirmed inactive/)
+  assert.match(noStatus.stderr, /tailscale serve status failed; the board stays stopped/)
+  assert.doesNotMatch(noStatus.stdout, /board_setup --lock |cli\.mjs serve|systemctl (start|restart)/)
+  // A route at the lock port also stops it.
+  const routed = relock('inactive', `echo '{"Web":{"h:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:14100"}}}}}'`)
+  assert.equal(routed.status, 1)
+  assert.match(routed.stderr, /a tailscale serve route points at port 14100/)
+  // A board systemd does not report stopped is never relocked, and install says so.
+  const running = relock('active', 'return 1')
+  assert.equal(running.status, 1)
+  assert.match(running.stderr, /devchat-export\.timer is active[\s\S]*could not be confirmed stopped/)
+  assert.doesNotMatch(running.stdout, /confirmed inactive|board_setup --lock /)
 })
 
-test('a failure after the routes change stops the board and removes devchat mounts, or says it could not', () => {
-  const stubs = (removal: string) => `
-systemctl() { echo "systemctl $*"; }
-serve_plan() { if [ "\${1:-}" = --remove ]; then ${removal}; else echo set; fi; }
-tailscale() { echo "tailscale $*"; case "$*" in *'--set-path=/ http'*) return 1 ;; *' off') touch "$STAGE/removed" ;; esac; }`
-  const removed = runStep(/^Only now, expose/, stubs(`[ -e "$STAGE/removed" ] || echo 'off 8443 /'`))
-  assert.equal(removed.status, 1)
-  assert.match(removed.stdout, /systemctl stop devchat-export\.timer devchat-board\.service[\s\S]*tailscale serve --https=8443 --set-path=\/ off/)
-  assert.match(removed.stderr, /applying the tailnet routes failed[\s\S]*routes are removed and the board is stopped/)
-  const stuck = runStep(/^Only now, expose/, stubs(`echo 'off 8443 /'`))
-  assert.equal(stuck.status, 1)
-  assert.match(stuck.stderr, /devchat mounts remain[\s\S]*could not be confirmed, and the board is stopped/)
+test('a failure after the routes change stops the board, confirmed, and names the commands that remove its routes', () => {
+  const expose = (state: string) => runStep(/^Only now, expose/, `
+${systemctl(state)}
+serve_plan() { echo set; }
+tailscale() { echo "tailscale $*"; case "$*" in *'--set-path=/ http'*) return 1 ;; esac; }`)
+  const stopped = expose('inactive')
+  assert.equal(stopped.status, 1)
+  assert.match(stopped.stdout, /systemctl stop devchat-export\.timer devchat-board\.service[\s\S]*confirmed inactive/)
+  assert.match(stopped.stderr, /applying the tailnet routes failed[\s\S]*the board is stopped, so devchat's routes reach nothing\. Remove them with: tailscale serve --https=8443 --set-path=\/api\/board off; tailscale serve --https=8443 --set-path=\/ off/)
+  assert.doesNotMatch(stopped.stdout, / off$/m)
+  const running = expose('active')
+  assert.equal(running.status, 1)
+  assert.match(running.stderr, /could not be confirmed stopped/)
+  assert.doesNotMatch(running.stderr + running.stdout, /the board is stopped|confirmed inactive/)
 })

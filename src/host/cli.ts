@@ -12,7 +12,7 @@ import { exportBoard } from './export.ts'
 import { boardLockProblems, lockBoard, setupBoard } from './grants.ts'
 import { parseSelfName, parseServeStatus, planServe, routesSchema, type Routes } from './serve.ts'
 import { installSteps, renderPlan, renderScript, uninstallSteps, type Step } from './script.ts'
-import { boardUrl, defaultPorts, hostPaths, readSettings, settingsSchema, unitNames, type Settings } from './settings.ts'
+import { boardUrl, defaultPorts, hostPaths, readSettings, rootFileProblems, settingsSchema, unitNames, type Settings } from './settings.ts'
 import { verifyHost } from './verify.ts'
 
 const usage = `usage: devchat-host <command> [options]
@@ -98,14 +98,21 @@ async function openBoardWhenReady(waitSeconds: number) {
   }
 }
 
-/** The routes a finished install recorded, if any. */
-function readRoutes(file: string = hostPaths.routesFile): Routes | undefined {
+/**
+ * The routes a finished install recorded, if any, trusted only when root alone can change the
+ * file. `skip` lists the read errors that mean "no record here", such as EACCES before sudo.
+ */
+async function readRoutes(file: string = hostPaths.routesFile, skip = ['ENOENT']): Promise<Routes | undefined> {
+  let text
   try {
-    return routesSchema.parse(JSON.parse(readFileSync(file, 'utf8')))
+    text = readFileSync(file, 'utf8')
   } catch (error) {
-    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined
+    if (error instanceof Error && 'code' in error && skip.includes(String(error.code))) return undefined
     throw error
   }
+  const problems = await rootFileProblems(file)
+  if (problems.length > 0) throw new Error(`not trusting ${file}: ${problems.join('; ')}`)
+  return routesSchema.parse(JSON.parse(text))
 }
 
 function tailscale(...args: string[]) {
@@ -148,8 +155,12 @@ async function main(argv: string[]) {
       const { values } = parseArgs({ args: rest, options: { ...settingFlags, node: { type: 'string' }, 'dry-run': { type: 'boolean' } } })
       const settings = await resolveSettings(values)
       const expose = !values['no-expose']
-      // The same plan the root script runs before it exposes anything, here before any change.
-      if (expose) planServe(parseServeStatus(tailscale('serve', 'status', '--json')), settings, parseSelfName(tailscale('status', '--json')), { recorded: readRoutes() })
+      // The same plan the root script runs before it exposes anything, here before any change. An
+      // earlier install's /etc/devchat may be closed to this account; the root script reads it then.
+      if (expose) {
+        planServe(parseServeStatus(tailscale('serve', 'status', '--json')), settings, parseSelfName(tailscale('status', '--json')),
+          { recorded: await readRoutes(hostPaths.routesFile, ['ENOENT', 'EACCES']) })
+      }
       const steps = installSteps({
         settings,
         nodeSource: realpathSync(values.node ?? process.execPath),
@@ -195,9 +206,11 @@ async function main(argv: string[]) {
     case 'board-setup': {
       const { values } = parseArgs({ args: rest, options: {
         config: { type: 'string' }, wait: { type: 'string' }, lock: { type: 'boolean' }, 'lock-check': { type: 'boolean' },
+        'board-port': { type: 'string' },
       } })
       const settings = await readSettings(values.config)
-      process.env.BOARD_URL ??= boardUrl(settings)
+      // --board-port: the loopback-only board install locks on a port no route points to.
+      process.env.BOARD_URL ??= boardUrl({ boardPort: settingsSchema.shape.boardPort.parse(Number(values['board-port'] ?? settings.boardPort)) })
       const handle = await openBoardWhenReady(Number(values.wait ?? 30))
       if (values['lock-check']) {
         const problems = await boardLockProblems(handle, settings.login)
@@ -213,7 +226,7 @@ async function main(argv: string[]) {
       } })
       if (values.status === undefined || values.self === undefined) throw new Error('serve-plan needs --status <file> --self <file>')
       const plan = planServe(parseServeStatus(readFileSync(values.status, 'utf8')), await readSettings(values.config),
-        parseSelfName(readFileSync(values.self, 'utf8')), { recorded: readRoutes(values.routes), remove: values.remove ?? false })
+        parseSelfName(readFileSync(values.self, 'utf8')), { recorded: await readRoutes(values.routes), remove: values.remove ?? false })
       for (const line of plan) console.log(line)
       return 0
     }

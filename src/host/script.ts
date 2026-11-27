@@ -78,9 +78,9 @@ if systemctl is-active --quiet ${unit}; then unchanged "${unit} running"; else r
 const hostCliRun = `"\${AS_DEVCHAT[@]}" ${node} ${hostCli}`
 
 /**
- * Bash functions that plan devchat's tailscale serve mounts as the service account, apply a plan,
- * remove devchat's mounts, and handle a failure after a change. `setRoutes` is the bash for `set`.
- * Each returns non-zero on any failure, since `set -e` does not apply inside `||`.
+ * Bash functions that plan devchat's tailscale serve mounts as the service account and apply a
+ * plan. `setRoutes` is the bash for `set`. Each returns non-zero on any failure, since `set -e`
+ * does not apply inside `||`.
  */
 const serveHelpers = (setRoutes: string) => `# Applies a serve plan from devchat-host serve-plan: lines of "unchanged", "off <port> <path>",
 # or "set". Only a port number and one of devchat's two paths reach a command.
@@ -106,24 +106,18 @@ serve_plan() {
   tailscale status --json > "$STAGE/self.json" || { printf 'error: tailscale status failed\\n' >&2; return 1; }
   chmod 644 "$STAGE/serve.json" "$STAGE/self.json" || return 1
   ${hostCliRun} serve-plan --config ${configFile} --routes ${routesFile} --status "$STAGE/serve.json" --self "$STAGE/self.json" "$@"
-}
-# Removes devchat's mounts, and succeeds only when a fresh plan finds none left. Only then does it
-# forget the recorded routes, so a rerun or uninstall still finds the old mounts.
-remove_routes() {
-  local plan
-  plan=$(serve_plan --remove) || return 1
-  apply_serve_plan "$plan" || return 1
-  plan=$(serve_plan --remove) || return 1
-  if [ -n "$plan" ]; then printf 'error: devchat mounts remain:\\n%s\\n' "$plan" >&2; return 1; fi
-  if [ -f ${routesFile} ]; then run rm -f ${routesFile} || return 1; fi
-}
-# The one way out of a failure after routes changed: stop the board, remove devchat's mounts, exit.
-routes_failed() {
-  printf 'error: %s\\n' "$1" >&2
-  run systemctl stop ${unitNames.exportTimer} ${unitNames.board} || true
-  if remove_routes; then fail "devchat's tailnet routes are removed and the board is stopped: fix the cause, then rerun"; fi
-  fail "removing devchat's tailnet routes could not be confirmed, and the board is stopped: check tailscale serve status, then rerun"
 }`
+
+/** Commands that remove devchat's two mounts on `port`, for a person to run. */
+const removalCommands = (port: string) =>
+  `tailscale serve --https=${port} --set-path=/api/board off; tailscale serve --https=${port} --set-path=/ off`
+
+/** The loopback port install locks the board on: a fixed offset from its port, which no devchat route uses. */
+function lockPort({ boardPort, appPort, httpsPort }: Settings) {
+  const port = boardPort + (boardPort <= 55_535 ? 10_000 : -10_000)
+  if (port === appPort || port === httpsPort) throw new Error(`install locks the board on port ${port}, which --app-port or --https-port uses: pick other ports`)
+  return port
+}
 
 export type InstallOptions = {
   settings: Settings
@@ -151,7 +145,9 @@ export function installSteps({ settings, nodeSource, modulesSource, sourceUid, s
   const setRoutes = `run tailscale serve --bg --https=${settings.httpsPort} --set-path=/api/board ${url} || return 1
         run tailscale serve --bg --https=${settings.httpsPort} --set-path=/ http://127.0.0.1:${settings.appPort} || return 1
         applied 'tailnet routes on :${settings.httpsPort}'`
-  const bootstrap = boardServeArgs(settings, { tailnet: false }).join(' ')
+  const lock = lockPort(settings)
+  const bootstrap = boardServeArgs({ ...settings, boardPort: lock }, { tailnet: false }).join(' ')
+  const { exportTimer, board, app } = unitNames
   const steps: Step[] = [
     {
       title: 'Check the prerequisites and every path install writes',
@@ -180,7 +176,28 @@ board_setup() {
   printf '%s\\n' "$out" | sed 's/^/  /'
   APPLIED=$((APPLIED + $(printf '%s\\n' "$out" | grep -c '^applied:' || true)))
 }
-${serveHelpers(setRoutes)}`,
+${serveHelpers(setRoutes)}
+# Stops the export timer and the board (the app with it, through PartOf), and succeeds only when
+# systemd reports all three inactive.
+stop_board() {
+  local unit state
+  run systemctl stop ${exportTimer} ${board} || true
+  for unit in ${exportTimer} ${board} ${app}; do
+    state=$(systemctl show -p ActiveState --value "$unit") || return 1
+    case "$state" in
+      inactive|failed) ;;
+      *) printf 'error: %s is %s\\n' "$unit" "$state" >&2; return 1 ;;
+    esac
+  done
+}
+# The one way out of a failure after the routes changed: a route to a stopped board reaches
+# nothing, so this stops the board, confirms it, and names the commands that remove the routes.
+routes_failed() {
+  printf 'error: %s\\n' "$1" >&2
+  stop_board || fail 'the board could not be confirmed stopped: run systemctl stop ${exportTimer} ${board}, then check systemctl status ${board}'
+  applied 'stopped ${exportTimer}, ${board}, and ${app}, confirmed inactive'
+  fail "the board is stopped, so devchat's routes reach nothing. Remove them with: ${removalCommands(String(settings.httpsPort))}; then rerun install"
+}`,
     },
     {
       title: `Create the system account ${account} and its state directory ${stateDir} (700)`,
@@ -245,29 +262,24 @@ if [ "$UNITS_CHANGED" = 1 ]; then run systemctl daemon-reload; RESTART=1; fi`,
     {
       title: `Before the board serves the tailnet with these units: lock it, on loopback only, as ${account}`,
       bash: `# Board's default grant g1 lets a forged loopback tailnet header manage a board served with
-# --tailscale. A running board must already be locked; one that is not loses its tailnet routes and
-# is locked again on loopback only, before any restart with --tailscale.
-LOCK_ON_LOOPBACK=1
-if systemctl is-active --quiet ${unitNames.board}; then
-  if board_setup --lock-check; then
-    LOCK_ON_LOOPBACK=0
-  else
-    # Stop first: the board stays down until its routes are gone and it is locked again below. The
-    # export service requires the board, so its timer stops too; a later step starts it again.
-    run systemctl stop ${unitNames.exportTimer} ${unitNames.board}
-    applied 'stopped ${unitNames.exportTimer}, ${unitNames.board}, and, through PartOf, ${unitNames.app}'
-    # Without tailscale nothing serves the board on the tailnet; with it, removal must be confirmed.
-    if command -v tailscale >/dev/null; then
-      remove_routes || fail 'the board was not locked, and removing its tailnet routes could not be confirmed: it stays stopped. Check tailscale serve status, then rerun install'
-    fi
+# --tailscale. The board is safe while it is locked or stopped, whatever routes point at it: a board
+# that is not running locked stops, confirmed, and is locked on loopback on port ${lock}, which no
+# route points to. Only then does the next step start it with --tailscale.
+if systemctl is-active --quiet ${board} && board_setup --lock-check; then
+  unchanged 'board locked'
+else
+  stop_board || fail 'the board is not locked and could not be confirmed stopped: run systemctl stop ${exportTimer} ${board}'
+  applied 'stopped ${exportTimer}, ${board}, and ${app}, confirmed inactive'
+  if (exec 3<>/dev/tcp/127.0.0.1/${lock}) 2>/dev/null; then fail 'port ${lock}, where install locks the board, is in use; the board stays stopped'; fi
+  if command -v tailscale >/dev/null; then
+    routes=$(tailscale serve status --json) || fail 'tailscale serve status failed; the board stays stopped'
+    case "$routes" in *:${lock}[\\"/]*) fail 'a tailscale serve route points at port ${lock}; the board stays stopped' ;; esac
   fi
-fi
-if [ "$LOCK_ON_LOOPBACK" = 1 ]; then
   printf '  $ %s &\\n' ${shq(bootstrap)}
   "\${AS_DEVCHAT[@]}" ${bootstrap} >/dev/null 2>&1 &
   BOOT_PID=$!
   trap 'kill "$BOOT_PID" 2>/dev/null || true' EXIT
-  board_setup --lock || fail 'locking the board failed'
+  board_setup --lock --board-port ${lock} || fail 'locking the board failed; it stays stopped'
   kill "$BOOT_PID"; wait "$BOOT_PID" 2>/dev/null || true
   trap - EXIT
 fi`,
@@ -302,9 +314,10 @@ plan=$(serve_plan) || fail 'tailscale serve cannot take devchat routes; nothing 
 apply_serve_plan "$plan" || routes_failed 'applying the tailnet routes failed'
 plan=$(serve_plan) || routes_failed 'reading the tailnet routes after applying them failed'
 [ "$plan" = unchanged ] || routes_failed "tailscale serve did not reach the planned routes; still to change: $plan"
-ensure_file ${routesFile} root root 644 <<'DEVCHAT_EOF'
-${JSON.stringify({ httpsPort: settings.httpsPort, boardPort: settings.boardPort, appPort: settings.appPort })}
-DEVCHAT_EOF`,
+printf '%s\\n' ${shq(JSON.stringify({ httpsPort: settings.httpsPort, boardPort: settings.boardPort, appPort: settings.appPort }))} > "$STAGE/routes.json" \\
+  || routes_failed 'staging the route record failed'
+if cmp -s "$STAGE/routes.json" ${routesFile} && [ "$(owner_mode ${routesFile})" = root:root:644 ]; then unchanged '${routesFile}'
+else run install -o root -g root -m 644 "$STAGE/routes.json" ${routesFile} || routes_failed 'recording the tailnet routes failed'; applied '${routesFile}'; fi`,
     })
   }
   return steps
@@ -324,10 +337,9 @@ if [ -f ${configFile} ] && [ -f ${node} ] && [ -f ${hostCli} ] && command -v tai
   safe_path ${stageDir}
   ensure_dir "$STAGE" root root 711
   find "$STAGE" -mindepth 1 -delete
-${serveHelpers("return 1")}
-  remove_routes || fail "removing devchat's tailnet routes could not be confirmed: check tailscale serve status, then rerun uninstall"
-else
-  printf '  note: %s\\n' 'no recorded settings or tailscale: check tailscale serve status for routes to remove by hand'
+${serveHelpers('return 1')}
+  plan=$(serve_plan --remove) && apply_serve_plan "$plan" && plan=$(serve_plan --remove) && [ -z "$plan" ] \\
+    && run rm -f ${routesFile} && applied "devchat's tailnet routes removed, confirmed"
 fi`,
     })
   }
@@ -344,9 +356,15 @@ run systemctl daemon-reload`,
     },
     {
       title: `Remove ${optDir} and ${configDir}`,
-      bash: `for dir in ${optDir} ${configDir}; do
-  if [ -e "$dir" ]; then run rm -rf "$dir"; applied "$dir removed"; else unchanged "$dir absent"; fi
-done`,
+      bash: `if [ -e ${optDir} ]; then run rm -rf ${optDir}; applied '${optDir} removed'; else unchanged '${optDir} absent'; fi
+# The route record stays until tailscale confirmed devchat's routes gone.
+if [ -e ${routesFile} ]; then
+  run rm -f ${configFile}
+  port=$(find ${routesFile} -maxdepth 0 -type f -user root ! -perm /022 -exec sed -n 's/^{"httpsPort":\\([0-9]*\\),.*/\\1/p' {} \\;)
+  printf '  kept %s: devchat routes were not confirmed removed. %s\\n' ${routesFile} \\
+    "$([ -n "$port" ] && printf 'Remove them with: %s' "${removalCommands('$port')}" || printf 'Check tailscale serve status.')"
+elif [ -e ${configDir} ]; then run rm -rf ${configDir}; applied '${configDir} removed'
+else unchanged '${configDir} absent'; fi`,
     },
     purge
       ? {

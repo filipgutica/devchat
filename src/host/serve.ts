@@ -1,13 +1,18 @@
 import { z } from 'zod'
 import { boardUrl, settingsSchema, type Settings } from './settings.ts'
 
-/** The part of `tailscale serve status --json` the plan reads. */
-const serveStatus = z.object({
+const listeners = {
   TCP: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
   Web: z.record(z.string(), z.object({
     Handlers: z.record(z.string(), z.object({ Proxy: z.string().optional() }).passthrough()).optional(),
   }).passthrough()).optional(),
+}
+
+/** The part of `tailscale serve status --json` the plan reads; `Foreground` holds running `tailscale serve` sessions. */
+const serveStatus = z.object({
+  ...listeners,
   AllowFunnel: z.record(z.string(), z.boolean()).optional(),
+  Foreground: z.record(z.string(), z.object(listeners).passthrough()).optional(),
 }).passthrough()
 
 /** `tailscale serve status --json` prints text, not JSON, when nothing is served. */
@@ -78,6 +83,11 @@ export function planServe(status: z.infer<typeof serveStatus>, settings: Setting
   const https = listener !== undefined && listener.HTTPS === true && Object.keys(listener).length === 1
   if (listener && !https) blockers.push(`port ${port} is not only an HTTPS listener: ${JSON.stringify(listener)}${listener.TCPForward ? ` (a TCP forward clears with \`tailscale serve --tcp=${port} off\`)` : ''}`)
   if (!listener && Object.keys(handlersAt(port)).length > 0) blockers.push(`${origin} has routes but no HTTPS listener`)
+  for (const [session, config] of Object.entries(status.Foreground ?? {})) {
+    if (config.TCP?.[String(port)] || Object.keys(config.Web ?? {}).some((key) => key.endsWith(`:${port}`))) {
+      blockers.push(`a foreground tailscale serve session (${session}) uses port ${port}: stop that session, or pick another --https-port`)
+    }
+  }
   if (blockers.length > 0) throw new Error(`devchat needs port ${port} to itself: ${blockers.join('; ')}. To use it, ${clear}`)
 
   const handlers = handlersAt(port)

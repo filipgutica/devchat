@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { z } from 'zod'
 import { channels } from '../shared/layout.ts'
 import { forgedTailnetClient, plainClient, type BoardRequester } from './board-http.ts'
-import { boardCli, boardUrl, hostPaths, ownerTokenFile, tailnetHost, unitNames, type Settings } from './settings.ts'
+import { boardCli, boardUrl, hostPaths, ownerTokenFile, rootFileProblems, tailnetHost, unitNames, type Settings } from './settings.ts'
 
 export type CheckResult = { name: string; ok: boolean; detail: string }
 type Check = (name: string, ok: boolean, detail: string) => void
@@ -252,6 +252,10 @@ export async function verifyHost(settings: Settings, { expose }: { expose: boole
   const token = await errorCode(() => readFile(tokenFile))
   check('owner credential unreadable', token === 'EACCES', `${tokenFile}: ${token}`)
   await checkNotWritable(check)
+  if (await errorCode(() => lstat(hostPaths.routesFile)) !== 'ENOENT') {
+    const problems = await rootFileProblems(hostPaths.routesFile).catch((error: unknown) => [String(error)])
+    check('recorded routes are root\'s alone', problems.length === 0, problems.length === 0 ? hostPaths.routesFile : problems.join('; '))
+  }
   await checkApp(settings, check)
 
   await checkAnonymousRoute(plainClient(loopback), 'loopback, plain HTTP', check)

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { lstat, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
 
@@ -61,6 +61,24 @@ export const tailnetHost = ({ host, httpsPort }: Pick<Settings, 'host' | 'httpsP
 export function ownerTokenFile(configHome: string, url: string) {
   const hash = createHash('sha256').update(url.replace(/\/+$/, '')).digest('hex').slice(0, 32)
   return join(configHome, 'board', 'local', `${hash}.json`)
+}
+
+/**
+ * Why `path` is not root's alone: each directory on it, and the file itself, must be root-owned,
+ * not a symlink, and not group- or world-writable. Empty when only root can change it.
+ */
+export async function rootFileProblems(path: string) {
+  const parts = path.split('/').filter(Boolean)
+  const problems: string[] = []
+  for (let depth = 0; depth <= parts.length; depth += 1) {
+    const current = `/${parts.slice(0, depth).join('/')}`
+    const isFile = depth === parts.length
+    const stat = await lstat(current)
+    if (isFile ? !stat.isFile() : !stat.isDirectory()) problems.push(`${current} is not a ${isFile ? 'regular file' : 'directory'}`)
+    if (stat.uid !== 0) problems.push(`${current} is not root-owned`)
+    if ((stat.mode & 0o022) !== 0) problems.push(`${current} is group- or world-writable`)
+  }
+  return problems
 }
 
 export async function readSettings(file: string = hostPaths.configFile) {

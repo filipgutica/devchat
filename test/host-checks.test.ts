@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict'
+import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import type { GrantView } from '@vercel/board'
 import { desiredGrants, lockProblems } from '../src/host/grants.ts'
 import { parseSelfName, parseServeStatus, planServe } from '../src/host/serve.ts'
-import { settingsSchema, type Settings } from '../src/host/settings.ts'
+import { rootFileProblems, settingsSchema, type Settings } from '../src/host/settings.ts'
 import { parseUnitShow } from '../src/host/verify.ts'
 
 const settings: Settings = { login: 'user@example.com', host: 'host.example.ts.net', httpsPort: 8443, boardPort: 4100, appPort: 4101 }
@@ -37,6 +40,7 @@ test('planServe sets the routes only on a port devchat has to itself, over HTTPS
     [web({ [ours]: devchat(4100, 4101) }, { funnel: [ours] }), /Funnel is on for host\.example\.ts\.net:8443/],
     [web({ [ours]: devchat(4100, 4101) }, { http: [ours] }), /port 8443 is not only an HTTPS listener/],
     [web({ 'svc.example.ts.net:8443': t3 }), /svc\.example\.ts\.net:8443 shares port 8443/],
+    [JSON.stringify({ Foreground: { s1: { TCP: { 8443: { HTTPS: true } } } } }), /a foreground tailscale serve session \(s1\) uses port 8443: stop that session/],
   ] as const) {
     assert.throws(() => plan(status), (error: Error) => blocker.test(error.message) && error.message.includes('`tailscale serve --https=8443 off`'), String(blocker))
   }
@@ -115,4 +119,14 @@ test('a tailnet login is lowercased at input and must fit Board\'s login rule', 
   for (const login of ['user+tag@example.com', '.user@example.com', `${'a'.repeat(65)}@example.com`, 'user@', 'user']) {
     assert.equal(parse(login).success, false, login)
   }
+})
+
+test('rootFileProblems trusts only a root-owned regular file that only root can write', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'devchat-routes-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const file = join(dir, 'routes.json')
+  await writeFile(file, '{}')
+  await symlink(file, join(dir, 'link.json'))
+  assert.ok((await rootFileProblems(file)).includes(`${file} is not root-owned`))
+  assert.ok((await rootFileProblems(join(dir, 'link.json'))).includes(`${join(dir, 'link.json')} is not a regular file`))
 })
