@@ -48,7 +48,7 @@ section 'a running board that is not locked is locked again on loopback before i
 vb grants create --everyone --can '*=read'
 relock=$("$bin" install --no-expose "${settings[@]}")
 printf '%s\n' "$relock"
-grep -q 'not locked: g[0-9]* gives everyone access' <<<"$relock"
+grep -q "not locked: g[0-9]* is not one of devchat's grants" <<<"$relock"
 grep -q 'applied: stopped devchat-board.service' <<<"$relock"
 as_devchat /opt/devchat/bin/node "$host_cli" board-setup --config /etc/devchat/app.json --lock-check
 

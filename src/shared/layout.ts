@@ -31,7 +31,7 @@ export const deferredIntentKinds = ['msg', 'queue', 'ack', 'react'] as const
 
 // A canonical Board client ID adds the four-character app: prefix to the intent's rid. A rid is
 // also a label value and a label-query term, so it excludes `|`, which Board reads as OR.
-const rid = z.string().max(196).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, 'A rid uses letters, digits, and . _ : -')
+export const rid = z.string().max(196).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, 'A rid uses letters, digits, and . _ : -')
 // Fields the app copies into labels must fit Board's label values: 1 to 256 characters, with no
 // control characters and no lone surrogates.
 const labelValue = z.string().min(1).max(256)

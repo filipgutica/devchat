@@ -5,7 +5,7 @@ import { boardUrl, hostCli, hostPaths, unitNames, type Settings } from './settin
 export type Step = { title: string; bash: string }
 
 /** Quotes a value for Bash. */
-export const shq = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`
+const shq = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`
 
 const { account, stateDir, configHome, node, optDir, appDir, configDir, configFile, unitDir, stageDir } = hostPaths
 
@@ -74,6 +74,51 @@ version_at_least() { printf '%s\n%s\n' "$2" "$1" | sort -V -C; }
 const ensureUnitActive = (unit: string) => `if systemctl is-enabled --quiet ${unit}; then unchanged "${unit} enabled"; else run systemctl enable ${unit}; applied "${unit} enabled"; fi
 if systemctl is-active --quiet ${unit}; then unchanged "${unit} running"; else run systemctl start ${unit}; applied "${unit} started"; fi`
 
+/** Runs the host CLI as the service account, from the root-owned install. */
+const hostCliRun = `"\${AS_DEVCHAT[@]}" ${node} ${hostCli}`
+
+/**
+ * Bash functions that plan devchat's tailscale serve mounts as the service account, apply the plan,
+ * and check that a second plan finds nothing left. `setRoutes` is the bash for a `set` line.
+ */
+const serveHelpers = (setRoutes: string) => `# Applies a serve plan from devchat-host serve-plan: lines of "unchanged", "off <port> <path>",
+# or "set". Only a port number and one of devchat's two paths reach a command.
+apply_serve_plan() {
+  local verb port path
+  while read -r verb port path; do
+    case "$verb" in
+      unchanged) unchanged 'tailnet routes' ;;
+      off) [[ "$port" =~ ^[0-9]+$ ]] && { [ "$path" = / ] || [ "$path" = /api/board ]; } || fail "bad serve plan: off $port $path"
+        run tailscale serve --https="$port" --set-path="$path" off; applied "devchat's tailnet route :$port$path removed" ;;
+      set) ${setRoutes} ;;
+      '') ;;
+      *) fail "bad serve plan: $verb" ;;
+    esac
+  done <<<"$1"
+}
+# Plans the serve routes from tailscale's registered config, as ${account} on a root-written copy.
+serve_plan() {
+  local status
+  local -a previous=()
+  status=$(tailscale serve status --json) || fail 'tailscale serve status failed'
+  printf '%s\n' "$status" > "$STAGE/serve.json"
+  chmod 644 "$STAGE/serve.json"
+  if [ -f "$STAGE/previous.json" ]; then previous=(--previous "$STAGE/previous.json"); fi
+  ${hostCliRun} serve-plan --config ${configFile} "\${previous[@]}" --status "$STAGE/serve.json" "$@"
+}
+# Plans, applies, then plans again from tailscale's live config: the second plan must find nothing
+# left to change (with --remove, no devchat route; otherwise exactly devchat's, HTTPS, no Funnel).
+converge_serve() {
+  local plan
+  plan=$(serve_plan "$@") || fail 'planning the tailnet routes failed'
+  apply_serve_plan "$plan"
+  plan=$(serve_plan "$@") || fail 'planning the tailnet routes failed'
+  case "$plan" in
+    ''|unchanged) ;;
+    *) fail "tailscale serve did not reach the planned state; still to change: $plan" ;;
+  esac
+}`
+
 export type InstallOptions = {
   settings: Settings
   /** The Node binary to copy. It must link only system libraries. */
@@ -97,7 +142,9 @@ const accountOwnedPaths = [stateDir, configHome, hostPaths.exportDir]
 export function installSteps({ settings, nodeSource, modulesSource, sourceUid, sourceGid, expose }: InstallOptions): Step[] {
   const units = renderUnits(settings)
   const url = boardUrl(settings)
-  const hostCliRun = `"\${AS_DEVCHAT[@]}" ${node} ${hostCli}`
+  const setRoutes = `run tailscale serve --bg --https=${settings.httpsPort} --set-path=/api/board ${url}
+        run tailscale serve --bg --https=${settings.httpsPort} --set-path=/ http://127.0.0.1:${settings.appPort}
+        applied 'tailnet routes on :${settings.httpsPort}'`
   const bootstrap = boardServeArgs(settings, { tailnet: false }).join(' ')
   const steps: Step[] = [
     {
@@ -127,30 +174,7 @@ board_setup() {
   printf '%s\\n' "$out" | sed 's/^/  /'
   APPLIED=$((APPLIED + $(printf '%s\\n' "$out" | grep -c '^applied:' || true)))
 }
-# Applies a serve plan from devchat-host serve-plan: lines of "unchanged", "off <port>", or "set".
-apply_serve_plan() {
-  local verb port
-  while read -r verb port; do
-    case "$verb" in
-      unchanged) unchanged "tailnet routes on :${settings.httpsPort}" ;;
-      off) [[ "$port" =~ ^[0-9]+$ ]] || fail "bad serve plan: off $port"
-        run tailscale serve --https="$port" off; applied "devchat's tailnet routes on :$port removed" ;;
-      set) run tailscale serve --bg --https=${settings.httpsPort} --set-path=/api/board ${url}
-        run tailscale serve --bg --https=${settings.httpsPort} --set-path=/ http://127.0.0.1:${settings.appPort}
-        applied "tailnet routes on :${settings.httpsPort}" ;;
-      '') ;;
-      *) fail "bad serve plan: $verb" ;;
-    esac
-  done <<<"$1"
-}
-# Plans the serve routes from tailscale's registered config, as ${account} on a root-written copy.
-serve_plan() {
-  local status
-  status=$(tailscale serve status --json) || fail 'tailscale serve status failed'
-  printf '%s\\n' "$status" > "$STAGE/serve.json"
-  chmod 644 "$STAGE/serve.json"
-  ${hostCliRun} serve-plan --config ${configFile} --status "$STAGE/serve.json" "$@"
-}`,
+${serveHelpers(setRoutes)}`,
     },
     {
       title: `Create the system account ${account} and its state directory ${stateDir} (700)`,
@@ -198,6 +222,8 @@ fi`,
     {
       title: `Write the app's settings to ${configFile} (root:${account} 640)`,
       bash: `ensure_dir ${configDir} root ${account} 750
+# The settings an earlier install recorded, so the serve plan finds devchat's old routes.
+if [ -f ${configFile} ]; then install -o root -g ${account} -m 640 ${configFile} "$STAGE/previous.json"; fi
 ensure_file ${configFile} root ${account} 640 <<'DEVCHAT_EOF'
 ${JSON.stringify(settings, null, 2)}
 DEVCHAT_EOF
@@ -221,12 +247,10 @@ if systemctl is-active --quiet ${unitNames.board}; then
   if board_setup --lock-check; then
     LOCK_ON_LOOPBACK=0
   else
-    # With no tailscale, or tailscaled down, nothing serves the board on the tailnet.
-    if command -v tailscale >/dev/null && tailscale serve status >/dev/null 2>&1; then
-      plan=$(serve_plan --remove) || fail 'planning the tailnet routes failed'
-      apply_serve_plan "$plan"
-    fi
+    # Stop first: the board stays down until its routes are gone and it is locked again below.
     run systemctl stop ${unitNames.board}; applied 'stopped ${unitNames.board} and, through PartOf, ${unitNames.app}'
+    # With no tailscale, or tailscaled down, nothing serves the board on the tailnet.
+    if command -v tailscale >/dev/null && tailscale serve status >/dev/null 2>&1; then converge_serve --remove; fi
   fi
 fi
 if [ "$LOCK_ON_LOOPBACK" = 1 ]; then
@@ -263,25 +287,33 @@ ${hostCliRun} status --app-port ${settings.appPort} --wait 30 | sed 's/^/  /'`,
   if (expose) {
     steps.push({
       title: `Only now, expose both on the tailnet at https://${settings.host}:${settings.httpsPort}/`,
-      bash: `# The plan compares tailscale's registered routes with these settings, and removes devchat's
-# routes on any other port.
-plan=$(serve_plan) || fail 'planning the tailnet routes failed'
-apply_serve_plan "$plan"`,
+      bash: `# The plan compares tailscale's registered routes with these settings: it removes devchat's
+# old mounts, sets its two mounts with Funnel off, and touches no other route.
+converge_serve`,
     })
   }
   return steps
 }
 
-export type UninstallOptions = { httpsPort: number; expose: boolean; purge: boolean }
+export type UninstallOptions = { expose: boolean; purge: boolean }
 
 /** The root script `devchat-host uninstall` runs: install in reverse. */
-export function uninstallSteps({ httpsPort, expose, purge }: UninstallOptions): Step[] {
+export function uninstallSteps({ expose, purge }: UninstallOptions): Step[] {
   const unitFiles = Object.values(unitNames).map((name) => `${unitDir}/${name}`)
   const steps: Step[] = []
   if (expose) {
     steps.push({
-      title: `Stop exposure: tailscale serve --https=${httpsPort} off`,
-      bash: `run tailscale serve --https=${httpsPort} off; applied 'tailnet routes on :${httpsPort} removed'`,
+      title: `Stop exposure: remove devchat's tailscale serve mounts, and no other route`,
+      bash: `# The recorded settings identify devchat's mounts; without them, nothing is removed.
+if [ -f ${configFile} ] && [ -f ${node} ] && [ -f ${hostCli} ] && command -v tailscale >/dev/null; then
+  safe_path ${stageDir}
+  ensure_dir "$STAGE" root root 711
+  find "$STAGE" -mindepth 1 -delete
+${serveHelpers("fail 'uninstall plans removals only'")}
+  converge_serve --remove
+else
+  printf '  note: %s\\n' 'no recorded settings or tailscale: check tailscale serve status for routes to remove by hand'
+fi`,
     })
   }
   steps.push(

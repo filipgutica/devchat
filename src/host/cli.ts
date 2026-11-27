@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import { z } from 'zod'
 import { exportBoard } from './export.ts'
-import { lockBoard, lockProblems, setupBoard } from './grants.ts'
+import { boardLockProblems, lockBoard, setupBoard } from './grants.ts'
 import { parseServeStatus, planServe } from './serve.ts'
 import { installSteps, renderPlan, renderScript, uninstallSteps, type Step } from './script.ts'
 import { boardUrl, defaultPorts, hostPaths, readSettings, settingsSchema, unitNames, type Settings } from './settings.ts'
@@ -150,11 +150,9 @@ async function main(argv: string[]) {
     }
     case 'uninstall': {
       const { values } = parseArgs({ args: rest, options: {
-        'https-port': settingFlags['https-port'], 'no-expose': settingFlags['no-expose'],
-        purge: { type: 'boolean' }, 'dry-run': { type: 'boolean' },
+        'no-expose': settingFlags['no-expose'], purge: { type: 'boolean' }, 'dry-run': { type: 'boolean' },
       } })
-      const httpsPort = settingsSchema.shape.httpsPort.parse(Number(values['https-port'] ?? defaultPorts.httpsPort))
-      return runAsRoot(uninstallSteps({ httpsPort, expose: !values['no-expose'], purge: values.purge ?? false }), values['dry-run'] ?? false)
+      return runAsRoot(uninstallSteps({ expose: !values['no-expose'], purge: values.purge ?? false }), values['dry-run'] ?? false)
     }
     case 'verify': {
       const { values } = parseArgs({ args: rest, options: settingFlags })
@@ -184,7 +182,7 @@ async function main(argv: string[]) {
       process.env.BOARD_URL ??= boardUrl(settings)
       const handle = await openBoardWhenReady(Number(values.wait ?? 30))
       if (values['lock-check']) {
-        const problems = lockProblems(await handle.grants())
+        const problems = await boardLockProblems(handle, settings.login)
         for (const problem of problems) console.log(`not locked: ${problem}`)
         return problems.length === 0 ? 0 : 1
       }
@@ -192,9 +190,14 @@ async function main(argv: string[]) {
       return 0
     }
     case 'serve-plan': {
-      const { values } = parseArgs({ args: rest, options: { config: { type: 'string' }, status: { type: 'string' }, remove: { type: 'boolean' } } })
+      const { values } = parseArgs({ args: rest, options: {
+        config: { type: 'string' }, previous: { type: 'string' }, status: { type: 'string' }, remove: { type: 'boolean' },
+      } })
       if (values.status === undefined) throw new Error('serve-plan needs --status <file>')
-      const plan = planServe(parseServeStatus(readFileSync(values.status, 'utf8')), await readSettings(values.config), { remove: values.remove ?? false })
+      const plan = planServe(parseServeStatus(readFileSync(values.status, 'utf8')), await readSettings(values.config), {
+        previous: values.previous === undefined ? undefined : await readSettings(values.previous),
+        remove: values.remove ?? false,
+      })
       for (const line of plan) console.log(line)
       return 0
     }

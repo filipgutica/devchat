@@ -32,8 +32,8 @@ test('install closes the default grants before the board serves the tailnet, and
   assert.equal(serves.length, 2)
   for (const line of serves) assert.doesNotMatch(line, /--tailscale/)
   assert.match(steps[lock]?.bash ?? '', /board_setup --lock\b/)
-  // A running board that is not locked loses its tailnet routes and stops before any restart.
-  assert.match(steps[lock]?.bash ?? '', /board_setup --lock-check[\s\S]*serve_plan --remove[\s\S]*systemctl stop devchat-board/)
+  // A running board that is not locked stops at once, then loses its tailnet routes, then is relocked.
+  assert.match(steps[lock]?.bash ?? '', /board_setup --lock-check[\s\S]*systemctl stop devchat-board[\s\S]*converge_serve --remove[\s\S]*board_setup --lock\b/)
 })
 
 test('install checks every destination before its first write, and stages only in its own directory', () => {
@@ -72,17 +72,19 @@ test('safe_path refuses a symlink and a world-writable directory on the path', (
 test('--no-expose leaves tailscale out of install, and uninstall keeps data unless --purge', () => {
   const local = installSteps({ settings, ...sources, expose: false })
   assert.ok(!local.some(({ title }) => /expose/.test(title)))
-  assert.doesNotMatch(renderScript(local), /^plan=\$\(serve_plan\)/m)
-  const kept = renderScript(uninstallSteps({ httpsPort: 8443, expose: true, purge: false }))
-  assert.match(kept, /tailscale serve --https=8443 off/)
+  assert.doesNotMatch(renderScript(local), /^converge_serve$/m)
+  const kept = renderScript(uninstallSteps({ expose: true, purge: false }))
+  // Uninstall removes devchat's mounts as planned from the recorded settings, never a whole port.
+  assert.match(kept, /converge_serve --remove/)
+  assert.doesNotMatch(kept, /tailscale serve --https=\S+ off/)
   assert.doesNotMatch(kept, /userdel|rm -rf \/var\/lib\/devchat/)
-  assert.match(renderScript(uninstallSteps({ httpsPort: 8443, expose: false, purge: true })), /userdel devchat/)
+  assert.match(renderScript(uninstallSteps({ expose: false, purge: true })), /userdel devchat/)
 })
 
 test('the root scripts parse, and quote the source paths', () => {
   for (const script of [
     renderScript(installSteps({ settings, ...sources, expose: true })),
-    renderScript(uninstallSteps({ httpsPort: 8443, expose: true, purge: true })),
+    renderScript(uninstallSteps({ expose: true, purge: true })),
   ]) {
     const result = bash(`set -n\n${script}`)
     assert.equal(result.status, 0, result.stderr)

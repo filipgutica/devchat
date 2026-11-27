@@ -1,39 +1,69 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { GrantView } from '@vercel/board'
-import { lockProblems } from '../src/host/grants.ts'
+import { desiredGrants, lockProblems } from '../src/host/grants.ts'
 import { parseServeStatus, planServe } from '../src/host/serve.ts'
 import { settingsSchema, type Settings } from '../src/host/settings.ts'
 import { parseUnitShow } from '../src/host/verify.ts'
 
 const settings: Settings = { login: 'user@example.com', host: 'host.example.ts.net', httpsPort: 8443, boardPort: 4100, appPort: 4101 }
-const web = (routes: Record<string, Record<string, string>>) => JSON.stringify({
+/** A serve status with HTTPS listeners on every port the routes use, and Funnel on for `funnel`. */
+const web = (routes: Record<string, Record<string, string>>, { funnel = [] as string[], http = [] as string[] } = {}) => JSON.stringify({
+  TCP: Object.fromEntries(Object.keys(routes).map((origin) => [origin.slice(origin.lastIndexOf(':') + 1), http.includes(origin) ? { HTTP: true } : { HTTPS: true }])),
   Web: Object.fromEntries(Object.entries(routes).map(([origin, handlers]) =>
     [origin, { Handlers: Object.fromEntries(Object.entries(handlers).map(([path, proxy]) => [path, { Proxy: proxy }])) }])),
+  AllowFunnel: Object.fromEntries(funnel.map((origin) => [origin, true])),
 })
 const t3 = { '/': 'http://127.0.0.1:3773' }
+const metrics = { '/metrics': 'http://127.0.0.1:9100' }
 const devchat = (board: number, app: number) => ({ '/api/board': `http://127.0.0.1:${board}/api/board`, '/': `http://127.0.0.1:${app}` })
+const ours = 'host.example.ts.net:8443'
 
-test('planServe sets the routes once, removes devchat routes left on another port, and spares other services', () => {
+test('planServe sets the routes once, over HTTPS with Funnel off, and spares other services', () => {
   const plan = (status: string, options = {}) => planServe(parseServeStatus(status), settings, options)
   assert.deepEqual(plan('No serve config'), ['set'])
   assert.deepEqual(plan(web({ 'host.example.ts.net:443': t3 })), ['set'])
-  assert.deepEqual(plan(web({ 'host.example.ts.net:443': t3, 'host.example.ts.net:8443': devchat(4100, 4101) })), ['unchanged'])
-  assert.deepEqual(plan(web({ 'host.example.ts.net:8443': devchat(4100, 4199) })), ['off 8443', 'set'])
-  assert.deepEqual(plan(web({ 'host.example.ts.net:443': t3, 'host.example.ts.net:9443': devchat(4100, 4101) })), ['off 9443', 'set'])
-  assert.deepEqual(plan(web({ 'host.example.ts.net:443': t3, 'host.example.ts.net:9443': devchat(4100, 4101) }), { remove: true }), ['off 9443'])
-  assert.throws(() => plan(web({ 'host.example.ts.net:8443': t3 })), /already serves something else/)
+  assert.deepEqual(plan(web({ 'host.example.ts.net:443': t3, [ours]: devchat(4100, 4101) })), ['unchanged'])
+  // Exact targets are not enough: Funnel on, or a listener that is not HTTPS, means set again.
+  assert.deepEqual(plan(web({ [ours]: devchat(4100, 4101) }, { funnel: [ours] })), ['set'])
+  assert.deepEqual(plan(web({ [ours]: devchat(4100, 4101) }, { http: [ours] })), ['set'])
+  assert.throws(() => plan(web({ [ours]: t3 })), /:8443\/ already serves http:\/\/127\.0\.0\.1:3773/)
 })
 
-test('lockProblems accepts only a board with no group grant and nothing for everyone', () => {
+test('planServe removes only devchat mounts, found by recorded host and targets, never a whole port', () => {
+  const plan = (status: string, options = {}) => planServe(parseServeStatus(status), settings, options)
+  const old = 'host.example.ts.net:9443'
+  // devchat moved from 9443: its two mounts go, the unrelated /metrics on the same port stays.
+  assert.deepEqual(plan(web({ [old]: { ...devchat(4100, 4101), ...metrics } })), ['off 9443 /api/board', 'off 9443 /', 'set'])
+  assert.deepEqual(plan(web({ [old]: { ...devchat(4100, 4101), ...metrics }, [ours]: devchat(4100, 4101) }), { remove: true }),
+    ['off 9443 /api/board', 'off 9443 /', 'off 8443 /api/board', 'off 8443 /'])
+  // Mounts at another host, or with targets devchat never recorded, are someone else's.
+  assert.deepEqual(plan(web({ 'other.example.ts.net:9443': devchat(4100, 4101), [old]: devchat(4200, 4201) })), ['set'])
+  // The settings an earlier install recorded find its mounts after a port change.
+  const previous = { ...settings, httpsPort: 9443, boardPort: 4200, appPort: 4201 }
+  assert.deepEqual(plan(web({ [old]: { ...devchat(4200, 4201), ...metrics } }), { previous }), ['off 9443 /api/board', 'off 9443 /', 'set'])
+  assert.deepEqual(plan(web({ [ours]: devchat(4200, 4201) }), { previous }), ['off 8443 /api/board', 'off 8443 /', 'set'])
+})
+
+test('lockProblems accepts only devchat grants, with the login grant at most as intended', () => {
   const grant = (id: string, principals: GrantView['principals'], can: GrantView['can']): GrantView =>
     ({ id, principals, can, capped: false, by: null, at: null })
+  const user = (userId: string) => ({ kind: 'user' as const, userId, email: null })
+  const desired = desiredGrants({ login: 'user@example.com', account: 'devchat' })
   const closed = grant('g4', [{ kind: 'everyone' }], { '*': [] })
-  const owner = grant('g5', [{ kind: 'user', userId: 'devchat', email: null }], { '*': 'all' })
-  assert.deepEqual(lockProblems([closed, owner]), [])
-  assert.deepEqual(lockProblems([grant('g1', [{ kind: 'all-users' }], { '*': 'all' }), closed, owner]), ['g1 names a group'])
-  assert.deepEqual(lockProblems([closed, owner, grant('g9', [{ kind: 'everyone' }], { 'todos': ['read'] })]), ['g9 gives everyone access'])
-  assert.deepEqual(lockProblems([owner]), ["no grant gives everyone nothing at '*'"])
+  const owner = grant('g5', [user('devchat')], { '*': 'all' })
+  const tailnet = grant('g6', [user('user@example.com')], Object.fromEntries(
+    Object.entries(desired[2]?.can ?? {}).map(([pattern, can]) => [pattern, can === 'all' || can === 'none' ? [] : [...can]])))
+  assert.deepEqual(lockProblems([closed, owner], desired), [])
+  assert.deepEqual(lockProblems([closed, owner, tailnet], desired), [])
+  assert.deepEqual(lockProblems([grant('g1', [{ kind: 'all-users' }], { '*': 'all' }), closed, owner], desired),
+    ["g1 is not one of devchat's grants"])
+  assert.deepEqual(lockProblems([closed, owner, grant('g9', [{ kind: 'everyone' }], { todos: ['read'] })], desired),
+    ["g9 is not one of devchat's grants"])
+  // The login with more than its split is as unsafe as a default grant.
+  assert.deepEqual(lockProblems([closed, owner, grant('g7', [user('user@example.com')], { '*': 'all' })], desired),
+    ["g7 is not one of devchat's grants"])
+  assert.deepEqual(lockProblems([owner], desired), ['missing everyone *='])
 })
 
 test('parseUnitShow names every file a unit uses and its environment', () => {
@@ -44,7 +74,7 @@ test('parseUnitShow names every file a unit uses and its environment', () => {
     'DropInPaths=/usr/lib/systemd/system/service.d/10-timeout-abort.conf /etc/systemd/system/devchat-board.service.d/override.conf',
     'FragmentPath=/etc/systemd/system/devchat-board.service',
   ].join('\n')
-  const { files, environment } = parseUnitShow(shown)
+  const { files, environment, unshipped } = parseUnitShow(shown)
   assert.deepEqual(files.sort(), [
     '/etc/default/devchat',
     '/etc/systemd/system/devchat-board.service',
@@ -56,6 +86,9 @@ test('parseUnitShow names every file a unit uses and its environment', () => {
     '/var/lib/devchat/board',
   ])
   assert.deepEqual(environment, ['HOME=/var/lib/devchat', 'NODE_OPTIONS=--require=/tmp/x.js'])
+  assert.deepEqual(unshipped, ['EnvironmentFiles'])
+  const hooked = parseUnitShow(['ExecStartPre={ path=/bin/sh ; argv[]=/bin/sh -c x ; ignore_errors=no }', 'ExecStop=', 'ExecReload={ path=/bin/kill ; argv[]=/bin/kill -HUP ; ignore_errors=no }'].join('\n'))
+  assert.deepEqual(hooked.unshipped, ['ExecStartPre', 'ExecReload'])
 })
 
 test('a tailnet login is lowercased at input and must fit Board\'s login rule', () => {

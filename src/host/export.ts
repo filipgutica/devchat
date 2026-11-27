@@ -1,8 +1,9 @@
 import type { Board, MessageView } from '@vercel/board'
 import { readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { rid as ridSchema } from '../shared/layout.ts'
 
-export const exportsKept = 14
+const exportsKept = 14
 const exportName = /^devchat-\d{8}T\d{6}Z\.json$/
 
 /** The export files beyond the newest `keep`, oldest first. Names sort by time. */
@@ -12,8 +13,8 @@ export function exportsToPrune(names: readonly string[], keep = exportsKept) {
 }
 
 /**
- * Every post on the board, keyed by its `rid`; a post without one (an intent, a marker) by its
- * Board ID, as `#<id>`. A Map, so a key such as `__proto__` is data. A second post with a `rid` already seen
+ * Every post on the board, keyed by its `rid`; a post without a well-formed one (an intent, a
+ * marker) by its Board ID, as `#<id>`. A Map, so a key such as `__proto__` is data. A second post with a `rid` already seen
  * is kept under its Board ID and listed in `duplicates`: an export loses nothing.
  */
 async function readAll(handle: Board) {
@@ -29,9 +30,10 @@ async function readAll(handle: Board) {
         const last = messages.at(-1)
         if (!last) break
         for (const message of messages) {
-          const rid = message.labels.rid
+          // Only a rid in the layout's shape keys a record. It never starts with `#`, so it cannot
+          // collide with a Board ID key; Board itself accepts any label value.
+          const rid = ridSchema.safeParse(message.labels.rid).data
           if (rid !== undefined && records.has(rid)) duplicates.push({ rid, id: message.id })
-          // `#` never appears in a rid, so a Board ID key cannot collide with one.
           records.set(rid === undefined || records.has(rid) ? `#${message.id}` : rid, message)
         }
         after = last.id

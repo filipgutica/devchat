@@ -9,7 +9,7 @@ type Permission = 'read' | 'post' | 'react' | 'label' | 'sync' | 'manage'
  * in release 1: a label there could change the board marker's epoch and stop every client's sync,
  * and the machine markers that need writes arrive in release 3.
  */
-export const tailnetCan = {
+const tailnetCan = {
   [channels.todos]: ['read'],
   [channels.work]: ['read'],
   [channels.msg]: ['read'],
@@ -36,7 +36,7 @@ export function desiredGrants({ login, account }: { login: string; account: stri
 type GrantShape = { principals: readonly ({ kind: string; userId?: string | undefined })[]; can: Readonly<Record<string, 'all' | 'none' | readonly string[]>> }
 
 /** One string per grant, the same for a grant as written and as the board lists it. */
-export function grantKey({ principals, can }: GrantShape) {
+function grantKey({ principals, can }: GrantShape) {
   const who = principals.map(({ kind, userId }) => (userId === undefined ? kind : `${kind}:${userId}`)).sort()
   const what = Object.entries(can)
     .map(([pattern, permissions]) => {
@@ -80,7 +80,7 @@ async function applyGrantPlan(handle: Board, { create, revoke }: ReturnType<type
 }
 
 /** Converges the board's grants to `desired`, then lists them again and fails on any difference. */
-export async function convergeGrants(handle: Board, desired: readonly GrantInput[], log: Log) {
+async function convergeGrants(handle: Board, desired: readonly GrantInput[], log: Log) {
   await applyGrantPlan(handle, planGrants(await handle.grants(), desired), log)
   const after = planGrants(await handle.grants(), desired)
   if (after.create.length > 0 || after.revoke.length > 0) {
@@ -92,7 +92,7 @@ const sameSet = (a: readonly string[], b: readonly string[]) =>
   a.length === b.length && [...a].sort().join() === [...b].sort().join()
 
 /** `grants explain` for the tailnet login on every channel the split names, and one it doesn't. */
-export async function explainGrants(handle: Board, login: string, log: Log) {
+async function explainGrants(handle: Board, login: string, log: Log) {
   const expected: [string, readonly string[]][] = [
     ...Object.entries(tailnetCan).map(([pattern, can]): [string, readonly string[]] =>
       [pattern.endsWith('/') ? `${pattern}global` : pattern, can]),
@@ -108,7 +108,7 @@ export async function explainGrants(handle: Board, login: string, log: Log) {
 }
 
 /** Posts the board marker with `epoch=1` once. An existing marker keeps its `epoch`. */
-export async function ensureBoardMarker(handle: Board, log: Log) {
+async function ensureBoardMarker(handle: Board, log: Log) {
   try {
     const marker = await handle.posted(boardMarker.id)
     log(`unchanged: board marker (epoch=${marker.labels.epoch ?? 'unset'})`)
@@ -149,23 +149,22 @@ export async function setupBoard(handle: Board, login: string, log: Log) {
   await ensureBoardMarker(handle, log)
 }
 
-const groupKinds = new Set(['all-users', 'all-projects', 'all-apps'])
-
 /**
- * Why a board is not locked, if it is not: a locked board names no group (Board's defaults
- * g1–g3 do) and gives `everyone` nothing anywhere. Only then may it serve the tailnet.
+ * Why a board is not locked, if it is not. Locked means its grants are exactly devchat's: `everyone`
+ * gets nothing, the service account everything, and at most the tailnet login's exact grant. Any
+ * other grant (Board's defaults g1–g3, an open `everyone`, the login with more) is a problem.
+ * Only a locked board may serve the tailnet.
  */
-export function lockProblems(grants: readonly GrantView[]) {
-  const problems: string[] = []
-  for (const { id, principals, can } of grants) {
-    if (principals.some(({ kind }) => groupKinds.has(kind))) problems.push(`${id} names a group`)
-    if (principals.some(({ kind }) => kind === 'everyone')
-      && Object.values(can).some((permissions) => permissions === 'all' || permissions.length > 0)) {
-      problems.push(`${id} gives everyone access`)
-    }
-  }
-  if (!grants.some((grant) => grantKey(grant) === 'everyone *=')) {
-    problems.push("no grant gives everyone nothing at '*'")
-  }
-  return problems
+export function lockProblems(grants: readonly GrantView[], desired: readonly GrantInput[]) {
+  const [, , tailnet] = desired
+  const { create, revoke } = planGrants(grants, desired)
+  return [
+    ...revoke.map((id) => `${id} is not one of devchat's grants`),
+    ...create.filter((grant) => grant !== tailnet).map((grant) => `missing ${grantKey(grant)}`),
+  ]
+}
+
+/** `lockProblems` for this board, as the service account. */
+export async function boardLockProblems(handle: Board, login: string) {
+  return lockProblems(await handle.grants(), desiredGrants({ login, account: await serviceAccount(handle) }))
 }

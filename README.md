@@ -21,15 +21,15 @@ The script:
 2. Creates the system account `devchat` and its state directory `/var/lib/devchat` (mode 700).
 3. Copies the Node that runs `devchat-host` to `/opt/devchat/bin/node`, and the installed packages to `/opt/devchat/app`, both root-owned. It reads both with your account's rights into a private staging directory, and checks the staged copy: it refuses a Node that links libraries outside the system library directories, such as a Linuxbrew build, and a package that holds anything but regular files and directories.
 4. Writes `/etc/devchat/app.json` and the units `devchat-board.service`, `devchat-app.service`, and `devchat-export.timer`.
-5. Starts the board on loopback only and revokes Board's default grants. A running board that still has them loses its tailnet routes and is locked again the same way. Then it starts the board service, sets the grants for your tailnet login, checks them with `grants explain`, and posts the board marker.
+5. Starts the board on loopback only and revokes Board's default grants. A running board with any grant but devchat's own stops at once, loses its tailnet routes, and is locked again the same way. Then it starts the board service, sets the grants for your tailnet login, checks them with `grants explain`, and posts the board marker.
 6. Starts the app on `127.0.0.1` and the daily export timer, which keeps 14 exports in `/var/lib/devchat/exports`.
-7. Only then runs `tailscale serve --bg --https=8443` for `/api/board` and `/`, after comparing the routes tailscale has registered. It removes devchat's routes from any other port. Pass `--no-expose` to skip this.
+7. Only then runs `tailscale serve --bg --https=8443` for `/api/board` and `/`, after comparing the routes tailscale has registered. It removes devchat's old mounts, found by the recorded host and targets, and leaves every other route alone. It checks that the port serves HTTPS with Funnel off. Pass `--no-expose` to skip this.
 
 A second run changes nothing. An upgrade reruns `install` from a newer package.
 
 - `devchat-host verify --login … --host …` runs the trust checks from your own account, without `sudo`.
 - `devchat-host status` shows the services and what the app reports at `/devchat.json`.
-- `devchat-host uninstall` stops exposure with `tailscale serve --https=8443 off` and removes the services, `/opt/devchat`, and `/etc/devchat`. It keeps the board's data unless you pass `--purge`.
+- `devchat-host uninstall` removes devchat's `tailscale serve` mounts, and no other route, then removes the services, `/opt/devchat`, and `/etc/devchat`. It keeps the board's data unless you pass `--purge`.
 
 ### Known limits
 

@@ -21,13 +21,16 @@ test('exportBoard writes every post keyed by rid, private to the service account
   const root = await handle.post('work', { text: 'Review.', labels: { rid: 'work-1' } })
   await handle.reply(root.id, { text: 'Done.', labels: { rid: 'note-1' } })
   const repeated = await handle.post('todos', { text: 'Same rid.', labels: { rid: 'work-1' } })
-  await handle.post('todos', { text: 'Odd rid.', labels: { rid: '__proto__' } })
+  const proto = await handle.post('todos', { text: 'Odd rid.', labels: { rid: '__proto__' } })
   const intent = await handle.post('inbox', { text: '{"v":1}' })
+  // Board accepts any label value; a rid outside the layout rule, such as another post's fallback
+  // key, is keyed by its own Board ID and never overwrites that post.
+  const forged = await handle.post('todos', { text: 'Forged rid.', labels: { rid: `#${intent.id}` } })
   for (let day = 1; day <= 14; day += 1) await writeFile(join(dir, `devchat-202610${String(day).padStart(2, '0')}T030000Z.json`), '{}')
 
   const { file, records, duplicates, pruned } = await exportBoard(handle, dir, new Date('2026-11-27T03:00:00.000Z'))
   assert.equal(file, join(dir, 'devchat-20261127T030000Z.json'))
-  assert.equal(records, 5)
+  assert.equal(records, 6)
   assert.equal(duplicates, 1)
   assert.deepEqual(pruned, ['devchat-20261001T030000Z.json'])
   assert.equal((await readdir(dir)).length, 14)
@@ -36,7 +39,8 @@ test('exportBoard writes every post keyed by rid, private to the service account
   // Whichever post with rid work-1 is read first keeps the rid; the other is kept by its Board ID.
   const first = written.records['work-1'].id
   const second = first === root.id ? repeated.id : root.id
-  assert.deepEqual(Object.keys(written.records).sort(), [`#${intent.id}`, `#${second}`, '__proto__', 'note-1', 'work-1'].sort())
+  assert.deepEqual(Object.keys(written.records).sort(), [`#${intent.id}`, `#${second}`, `#${proto.id}`, `#${forged.id}`, 'note-1', 'work-1'].sort())
+  assert.equal(written.records[`#${intent.id}`].id, intent.id)
   assert.equal(Object.getPrototypeOf(written.records), Object.prototype)
   assert.deepEqual(written.duplicates, [{ rid: 'work-1', id: second }])
 })

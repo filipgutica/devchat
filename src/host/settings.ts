@@ -20,7 +20,7 @@ export const hostPaths = {
   unitDir: '/etc/systemd/system',
 } as const
 
-export const appModules = `${hostPaths.appDir}/node_modules`
+const appModules = `${hostPaths.appDir}/node_modules`
 export const boardCli = `${appModules}/@vercel/board/dist/cli.mjs`
 export const hostCli = `${appModules}/@filipgutica/devchat/dist/host/cli.js`
 export const appMain = `${appModules}/@filipgutica/devchat/dist/server/main.js`

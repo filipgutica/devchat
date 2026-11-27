@@ -16,7 +16,7 @@ const posted = z.object({ message: z.object({ id: z.string() }) })
 const explained = z.object({ can: z.array(z.string()) })
 /** A grant ID no board hands out: an owner's revoke of it changes nothing, so the probe is harmless. */
 const missingGrant = 'g999999'
-export const inboxProbe = { id: 'devchat-verify-probe', text: 'devchat-host verify probe: not an intent' } as const
+const inboxProbe = { id: 'devchat-verify-probe', text: 'devchat-host verify probe: not an intent' } as const
 
 /** A denied post in `work` and a denied grant change, for a caller with no credentials. */
 export async function checkAnonymousRoute(request: BoardRequester, route: string, check: Check) {
@@ -105,9 +105,14 @@ async function errorCode(action: () => Promise<unknown>) {
 /** Environment a unit must not set: each one loads code from somewhere else. */
 const codeLoadingEnv = /^(NODE_OPTIONS|NODE_PATH|LD_PRELOAD|LD_LIBRARY_PATH|LD_AUDIT)=/
 
+/** Settings the shipped units leave empty: each runs a command or reads a file besides ExecStart. */
+const unshippedSettings = ['ExecCondition', 'ExecStartPre', 'ExecStartPost', 'ExecReload', 'ExecStop', 'ExecStopPost', 'EnvironmentFiles'] as const
+
 /**
  * The files a unit uses, as systemd loaded it: its fragment, drop-ins, environment files, and each
- * absolute path in its commands, from `systemctl show -p ExecStart,Environment,EnvironmentFiles,DropInPaths,FragmentPath`.
+ * absolute path in its commands; its environment; and which settings the shipped units leave empty
+ * it sets. Reads `systemctl show -p` for ExecStart, Environment, DropInPaths, FragmentPath, and
+ * `unshippedSettings`.
  */
 export function parseUnitShow(text: string) {
   const values = new Map(text.split('\n').filter((line) => line.includes('=')).map((line) => {
@@ -128,7 +133,8 @@ export function parseUnitShow(text: string) {
     const value = entry.slice(entry.indexOf('=') + 1)
     if (value.startsWith('/')) files.push(value)
   }
-  return { files: [...new Set(files)], environment }
+  const unshipped = unshippedSettings.filter((name) => values.get(name))
+  return { files: [...new Set(files)], environment, unshipped }
 }
 
 const errorCodeOf = (error: unknown) => (error instanceof Error && 'code' in error ? String(error.code) : undefined)
@@ -177,13 +183,14 @@ async function checkNotWritable(check: Check) {
   const problems: string[] = []
   const files = new Set<string>([hostPaths.node, hostPaths.configFile])
   for (const unit of Object.values(unitNames)) {
-    const shown = spawnSync('systemctl', ['show', '-p', 'ExecStart,Environment,EnvironmentFiles,DropInPaths,FragmentPath', unit], { encoding: 'utf8' })
+    const shown = spawnSync('systemctl', ['show', '-p', ['ExecStart', 'Environment', 'DropInPaths', 'FragmentPath', ...unshippedSettings].join(','), unit], { encoding: 'utf8' })
     if (shown.status !== 0) {
       problems.push(`systemctl show ${unit} failed`)
       continue
     }
-    const { files: named, environment } = parseUnitShow(shown.stdout)
+    const { files: named, environment, unshipped } = parseUnitShow(shown.stdout)
     if (!named.length) problems.push(`${unit} is not loaded`)
+    for (const name of unshipped) problems.push(`${unit} sets ${name}`)
     for (const entry of environment) if (codeLoadingEnv.test(entry)) problems.push(`${unit} sets ${entry.slice(0, entry.indexOf('='))}`)
     for (const file of named) files.add(file)
   }
@@ -197,9 +204,10 @@ async function checkNotWritable(check: Check) {
     if (!stat.isFile() && !stat.isDirectory()) problems.push(`${path} is not a regular file or directory`)
     if (stat.uid !== 0 || (stat.mode & 0o022) !== 0) problems.push(`${path} is not root-owned or is group- or world-writable`)
     if (!stat.isDirectory()) return
-    // A directory this account cannot list, such as install's staging directory (711), it cannot change below.
+    // Install's staging directory (711) is the one directory this account cannot list; being
+    // root-owned and not writable, nothing below it changes from this account.
     const names = await readdir(path).catch((error: unknown) => {
-      if (errorCodeOf(error) === 'EACCES') return []
+      if (path === hostPaths.stageDir && errorCodeOf(error) === 'EACCES') return []
       throw error
     })
     for (const name of names) await walk(join(path, name))
