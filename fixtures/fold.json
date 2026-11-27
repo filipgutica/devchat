@@ -1,0 +1,58 @@
+[
+  {
+    "name": "work question, answer, resolve, and reopen",
+    "channel": "work",
+    "steps": [
+      {
+        "post": { "text": "Review the handoff.", "labels": { "rid": "work-1", "by": "agent", "repo": "example/project" } },
+        "rootLabels": { "rid": "work-1", "by": "agent", "repo": "example/project", "status": "open" }
+      },
+      {
+        "post": { "text": "The draft is ready.", "labels": { "rid": "note-1", "by": "agent", "kind": "note", "pr.1": "https://example.com/pull/1" } },
+        "rootLabels": { "rid": "work-1", "by": "agent", "repo": "example/project", "status": "open", "pr.1": "https://example.com/pull/1" }
+      },
+      {
+        "post": { "text": "Can we proceed?", "labels": { "rid": "ask-1", "by": "agent", "kind": "ask", "block": "1" } },
+        "rootLabels": { "rid": "work-1", "by": "agent", "repo": "example/project", "status": "blocked", "pr.1": "https://example.com/pull/1", "ask": "open", "turn": "ask-1" }
+      },
+      {
+        "post": { "text": "Which draft should we use?", "labels": { "rid": "ask-2", "by": "agent", "kind": "ask" } },
+        "rootLabels": { "rid": "work-1", "by": "agent", "repo": "example/project", "status": "open", "pr.1": "https://example.com/pull/1", "ask": "open", "turn": "ask-2" }
+      },
+      {
+        "post": { "text": "Use the latest draft.", "labels": { "rid": "answer-1", "by": "user", "kind": "answer", "re": "ask-2" } },
+        "rootLabels": { "rid": "work-1", "by": "agent", "repo": "example/project", "status": "open", "pr.1": "https://example.com/pull/1", "ask": "answered", "turn": "answer-1" }
+      },
+      {
+        "post": { "text": "A delayed update.", "labels": { "rid": "note-2", "by": "agent", "kind": "note" } },
+        "rootLabels": { "rid": "work-1", "by": "agent", "repo": "example/project", "status": "open", "pr.1": "https://example.com/pull/1", "ask": "answered", "turn": "answer-1" }
+      },
+      {
+        "post": { "text": "Resolved.", "labels": { "rid": "done-1", "by": "agent", "kind": "done", "re": "answer-1" } },
+        "rootLabels": { "rid": "work-1", "by": "agent", "repo": "example/project", "status": "done", "pr.1": "https://example.com/pull/1" }
+      },
+      {
+        "post": { "text": "Please revisit the draft.", "labels": { "rid": "answer-2", "by": "user", "kind": "answer" } },
+        "rootLabels": { "rid": "work-1", "by": "agent", "repo": "example/project", "status": "open", "pr.1": "https://example.com/pull/1", "ask": "answered", "turn": "answer-2" }
+      },
+      {
+        "post": { "text": "Picked up the request.", "labels": { "rid": "note-3", "by": "agent", "kind": "note", "re": "answer-2" } },
+        "rootLabels": { "rid": "work-1", "by": "agent", "repo": "example/project", "status": "open", "pr.1": "https://example.com/pull/1" }
+      }
+    ]
+  },
+  {
+    "name": "drop a todo",
+    "channel": "todos",
+    "steps": [
+      {
+        "post": { "text": "Check the queue.", "labels": { "rid": "todo-1", "by": "agent" } },
+        "rootLabels": { "rid": "todo-1", "by": "agent", "status": "open" }
+      },
+      {
+        "post": { "text": "Dropped.", "labels": { "rid": "drop-1", "by": "agent", "kind": "drop" } },
+        "rootLabels": { "rid": "todo-1", "by": "agent", "status": "dropped" }
+      }
+    ]
+  }
+]
