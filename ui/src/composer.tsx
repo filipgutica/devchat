@@ -28,14 +28,19 @@ export function Composer({ label, hint, offline, write, onSend }: ComposerProps)
   const busy = write.state.status === 'busy'
   const error = write.state.status === 'error' ? write.state : null
 
+  /** The text of the last send, which Retry resends whatever the field holds now. */
+  const sent = useRef('')
+
   async function send() {
     if (busy || offline || text.trim() === '') return
+    sent.current = text
     if (await onSend(text)) setText('')
     field.current?.focus()
   }
 
   async function retry() {
-    if (await write.retry()) setText('')
+    // Clear the field only if it still holds what was sent: an edit made since stays.
+    if (await write.retry()) setText((current) => (current === sent.current ? '' : current))
     field.current?.focus()
   }
 

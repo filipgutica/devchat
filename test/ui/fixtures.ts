@@ -18,16 +18,18 @@ export const test = base.extend<Fixtures>({
   // Every test fails on a console error or a blocked resource, such as a Content-Security-Policy violation.
   page: async ({ page }, use) => {
     const problems: string[] = []
-    page.on('console', (message) => message.type() === 'error' && problems.push(message.text()))
+    page.on('console', (message) => {
+      // A refused or dropped write, and a read while the host is down, log a failed request under
+      // /api/ui/; a test causes those on purpose. Any other failed load, such as a missing asset, fails.
+      const expected = message.location().url.includes('/api/ui/') && /Failed to load resource/.test(message.text())
+      if (message.type() === 'error' && !expected) problems.push(`${message.text()} ${message.location().url}`)
+    })
     page.on('pageerror', (error) => problems.push(error.message))
     await page.addInitScript(() => document.addEventListener('securitypolicyviolation', (event) => console.error(`CSP: ${event.violatedDirective} ${event.blockedURI}`)))
     await use(page)
-    expect(problems.filter((problem) => !expectedErrors.some((pattern) => pattern.test(problem)))).toEqual([])
+    expect(problems).toEqual([])
   },
 })
-
-/** Errors a test causes on purpose: a dropped connection and the app's refusals show in the console. */
-const expectedErrors = [/Failed to load resource/, /net::ERR_/]
 
 export { expect }
 

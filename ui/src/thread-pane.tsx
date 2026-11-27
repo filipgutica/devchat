@@ -82,7 +82,7 @@ function PaneResize({ width, onWidth }: { width: number; onWidth: (rem: number) 
  */
 function composerWording({ root, replies }: Thread) {
   const { ask, status } = root.labels
-  const lastAgent = [...replies, root].reverse().find((post) => byOf(post) !== 'user')
+  const lastAgent = [root, ...replies].reverse().find((post) => byOf(post) !== 'user')
   const label = !lastAgent ? 'Reply in this thread' : ask === 'open' ? `Answer ${byOf(lastAgent)}` : `Reply to ${byOf(lastAgent)}`
   const hint = isResolved(status) ? 'A reply reopens the thread. Saved to the board.'
     : ask === 'answered' ? 'Waiting for the agent. Replies are saved to the board.'

@@ -104,7 +104,8 @@ test('The composer adds a todo or a work item to the channel in view, saved by t
 
 test('An answer goes under the work item with re set to the question the pane showed', async ({ page, host }) => {
   await host.submit({ ...agent, rid: 'work-1', kind: 'work', channel: 'work', text: 'Ship the exporter.', repo: 'example/one' })
-  await host.submit({ ...agent, rid: 'ask-1', root: 'work-1', kind: 'ask', text: 'Which port?' })
+  // Another agent asks: the composer answers the agent whose question waits, not the root's author.
+  await host.submit({ ...agent, by: 'desktop-codex', rid: 'ask-1', root: 'work-1', kind: 'ask', text: 'Which port?' })
   await host.pass()
   await open(page, host)
   await page.getByRole('link', { name: 'Ship the exporter.' }).click()
@@ -113,8 +114,8 @@ test('An answer goes under the work item with re set to the question the pane sh
   await expect(pane.getByRole('heading', { name: /Thread/ })).toBeFocused()
   await expect(pane.locator('.pane-head .badge.info')).toHaveText('Needs you')
   await expect(rows(page, 'Replies').first()).toContainText('Asks you')
-  await composer(page, 'Answer laptop-claude').fill('Use 8443.')
-  await composer(page, 'Answer laptop-claude').press('Enter')
+  await composer(page, 'Answer desktop-codex').fill('Use 8443.')
+  await composer(page, 'Answer desktop-codex').press('Enter')
   await expect(rows(page, 'Replies')).toHaveCount(2)
   await expect(pane.locator('.pane-head .badge')).toHaveCount(0)
   await expect(pane.getByText('Waiting for the agent. Replies are saved to the board.')).toBeVisible()
@@ -182,9 +183,11 @@ test('A retry after a dropped answer resends the same rid and body, and the boar
   await expect(composer(page, 'New todo in #global')).toHaveValue('Back up the photos.')
   await expect(composer(page, 'New todo in #global')).toHaveAttribute('aria-invalid', 'true')
 
+  // Retry resends what was sent; a note typed meanwhile stays in the field.
+  await composer(page, 'New todo in #global').fill('Back up the photos, and the videos.')
   await page.getByRole('button', { name: 'Retry' }).click()
   await expect(rows(page, 'Open todos in #global')).toHaveCount(1)
-  await expect(composer(page, 'New todo in #global')).toHaveValue('')
+  await expect(composer(page, 'New todo in #global')).toHaveValue('Back up the photos, and the videos.')
   expect((await posts(host, 'todos')).filter((post) => post.text === 'Back up the photos.')).toHaveLength(1)
   expect(host.writes).toHaveLength(2)
   expect(host.writes[1]).toBe(host.writes[0])
