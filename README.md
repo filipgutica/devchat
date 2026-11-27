@@ -25,7 +25,7 @@ The script:
 6. Starts the app on `127.0.0.1` and the daily export timer, which keeps 14 exports in `/var/lib/devchat/exports`.
 7. Only then runs `tailscale serve --bg --https=8443` for `/api/board` and `/`, and records them in `/etc/devchat/routes.json` once tailscale shows them. devchat needs its HTTPS port to itself: install refuses a port with any other route, Funnel, or a listener other than HTTPS, and says how to clear it. It removes devchat's old mounts from the recorded port. If a change fails, it stops and disables the board, confirms it, and prints the commands that remove devchat's routes. Pass `--no-expose` to skip this.
 
-`--allowlist <owner,...>` names the GitHub owners whose repos may appear on the board; the app refuses an intent for any other repo, and every repo when the list is empty. `--machine <name>=<T3 environment ID>`, repeated, maps each machine to its T3 environment, which the app records as a work item's `env`. Both go to `/etc/devchat/app.json`, so pass them on every run.
+`--allowlist <owner,...>` names the GitHub owners whose repos may appear on the board; the app refuses an intent for any other repo, and every repo when the list is empty. `--machine <name>=<T3 environment ID>`, repeated, maps each machine to its T3 environment, which the app records as a work item's `env`. Both go to `/etc/devchat/app.json`. A rerun without a flag keeps the installed value, and an empty value clears it (`--allowlist ''`). The plan shows what install writes.
 
 A second run changes nothing. An upgrade reruns `install` from a newer package.
 

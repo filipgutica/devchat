@@ -12,7 +12,10 @@ import { exportBoard } from './export.ts'
 import { boardLockProblems, lockBoard, setupBoard } from './grants.ts'
 import { parseSelfName, parseServeStatus, planServe, routesSchema, type Routes } from './serve.ts'
 import { installSteps, renderPlan, renderScript, uninstallSteps, type Step } from './script.ts'
-import { boardUrl, defaultPorts, hostPaths, readSettings, rootFileProblems, settingsSchema, unitNames, type Settings } from './settings.ts'
+import {
+  boardUrl, defaultPorts, describeLists, hostPaths, installSettingsSchema, listFlags, mergeSettings, readSettings, rootFileProblems,
+  settingsSchema, unitNames, type InstallSettings,
+} from './settings.ts'
 import { verifyHost } from './verify.ts'
 
 const usage = `usage: devchat-host <command> [options]
@@ -21,6 +24,8 @@ const usage = `usage: devchat-host <command> [options]
               --login <tailnet login> --host <name>.ts.net [--https-port 8443]
               [--board-port 4100] [--app-port 4101] [--allowlist <owner,...>]
               [--machine <name>=<T3 environment ID>]... [--node <path>] [--no-expose] [--dry-run]
+              Without --allowlist or --machine, install keeps the installed value; an empty
+              value clears it (--allowlist '').
   verify      run the release 1 trust checks from your own account, without sudo
               --login <tailnet login> --host <name>.ts.net [ports as install] [--no-expose]
   status      show the services and what the app reports   [--app-port 4101] [--wait <seconds>]
@@ -55,21 +60,15 @@ type SettingValues = {
   allowlist?: string; machine?: string[]
 }
 
-async function resolveSettings(values: SettingValues): Promise<Settings> {
+async function resolveSettings(values: SettingValues): Promise<InstallSettings> {
   const port = (value: string | undefined, fallback: number) => (value === undefined ? fallback : Number(value))
-  const machines = (values.machine ?? []).map((entry) => {
-    const split = entry.indexOf('=')
-    if (split < 1) throw new Error(`--machine ${entry}: use <name>=<T3 environment ID>`)
-    return [entry.slice(0, split), entry.slice(split + 1)]
-  })
-  return settingsSchema.parse({
+  return installSettingsSchema.parse({
     login: values.login ?? await ask('Tailnet login (user@example.com): '),
     host: values.host ?? await ask('Host name on the tailnet (<host>.<tailnet>.ts.net): '),
     httpsPort: port(values['https-port'], defaultPorts.httpsPort),
     boardPort: port(values['board-port'], defaultPorts.boardPort),
     appPort: port(values['app-port'], defaultPorts.appPort),
-    allowlist: values.allowlist?.split(',').map((owner) => owner.trim()).filter(Boolean) ?? [],
-    machines: Object.fromEntries(machines),
+    ...listFlags(values),
   })
 }
 
@@ -233,6 +232,22 @@ async function main(argv: string[]) {
         return problems.length === 0 ? 0 : 1
       }
       await (values.lock ? lockBoard : setupBoard)(handle, settings.login, (line) => console.log(line))
+      return 0
+    }
+    // Prints the settings install writes: these flags, with the installed allowlist and machine map
+    // where the flags leave them out. The root script runs it as the service account, which can read app.json.
+    case 'settings-merge': {
+      const { values } = parseArgs({ args: rest, options: { config: { type: 'string' }, update: { type: 'string' } } })
+      const update = installSettingsSchema.parse(JSON.parse(values.update ?? 'null'))
+      let current = null
+      try {
+        current = await readSettings(values.config)
+      } catch (error) {
+        if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
+      }
+      const settings = mergeSettings(update, current)
+      console.error(`  ${describeLists(settings)}`)
+      console.log(JSON.stringify(settings, null, 2))
       return 0
     }
     case 'serve-plan': {

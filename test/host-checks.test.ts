@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
 import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { promisify } from 'node:util'
 import type { GrantView } from '@vercel/board'
 import { desiredGrants, lockProblems } from '../src/host/grants.ts'
 import { parseSelfName, parseServeStatus, planServe } from '../src/host/serve.ts'
-import { rootFileProblems, settingsSchema, type Settings } from '../src/host/settings.ts'
+import { listFlags, mergeSettings, rootFileProblems, settingsSchema, type Settings } from '../src/host/settings.ts'
 import { parseUnitShow } from '../src/host/verify.ts'
 
 const settings: Settings = { login: 'user@example.com', host: 'host.example.ts.net', httpsPort: 8443, boardPort: 4100, appPort: 4101, allowlist: [], machines: {} }
@@ -125,6 +127,35 @@ test('an app.json from before the allowlist parses with an empty allowlist and m
   const { allowlist: _allowlist, machines: _machines, ...before } = settings
   assert.deepEqual(settingsSchema.parse(before), { ...before, allowlist: [], machines: {} })
   assert.equal(settingsSchema.safeParse({ ...settings, allowlist: ['owner/repo'] }).success, false)
+  assert.equal(settingsSchema.safeParse({ ...settings, extra: 1 }).success, false)
+})
+
+test('install flags: an absent --allowlist or --machine keeps the installed value, a given one replaces it, an empty one clears it', () => {
+  const { allowlist: _allowlist, machines: _machines, ...ports } = settings
+  const installed: Settings = { ...settings, allowlist: ['example'], machines: { laptop: 'env-1' } }
+  const merge = (flags: Parameters<typeof listFlags>[0]) => mergeSettings({ ...ports, ...listFlags(flags) }, installed)
+  assert.deepEqual(merge({}), installed)
+  assert.deepEqual(merge({ allowlist: 'other, Third', machine: ['desktop=env-2'] }),
+    { ...installed, allowlist: ['other', 'Third'], machines: { desktop: 'env-2' } })
+  assert.deepEqual(merge({ allowlist: '', machine: [''] }), { ...installed, allowlist: [], machines: {} })
+  assert.deepEqual(mergeSettings(ports, null), { ...ports, allowlist: [], machines: {} })
+  assert.throws(() => listFlags({ machine: ['laptop'] }), /<name>=<T3 environment ID>/)
+})
+
+test('a rerun of install without --allowlist and --machine keeps both: settings-merge, as the root script runs it', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'devchat-settings-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const config = join(dir, 'app.json')
+  const { allowlist: _allowlist, machines: _machines, ...ports } = settings
+  const merge = (update: object) => promisify(execFile)(process.execPath,
+    [new URL('../src/host/cli.ts', import.meta.url).pathname, 'settings-merge', '--config', config, '--update', JSON.stringify(update)])
+
+  const first = await merge(ports)
+  assert.deepEqual(JSON.parse(first.stdout), { ...ports, allowlist: [], machines: {} })
+  await writeFile(config, (await merge({ ...ports, allowlist: ['example'], machines: { laptop: 'env-1' } })).stdout)
+  const rerun = await merge(ports)
+  assert.deepEqual(JSON.parse(rerun.stdout), { ...ports, allowlist: ['example'], machines: { laptop: 'env-1' } })
+  assert.equal(rerun.stderr, '  allowlist: example; machines: laptop=env-1\n')
 })
 
 test('rootFileProblems trusts only a root-owned regular file that only root can write', async (t) => {

@@ -1,5 +1,5 @@
 import { boardServeArgs, renderUnits } from './units.ts'
-import { boardUrl, hostCli, hostPaths, unitNames, type Settings } from './settings.ts'
+import { boardUrl, describeLists, hostCli, hostPaths, unitNames, type InstallSettings } from './settings.ts'
 
 /** One step of a root script: what it prints before it runs, and the Bash that runs it. */
 export type Step = { title: string; bash: string }
@@ -113,14 +113,14 @@ const removalCommands = (port: string) =>
   `tailscale serve --https=${port} --set-path=/api/board off; tailscale serve --https=${port} --set-path=/ off`
 
 /** The loopback port install locks the board on: a fixed offset from its port, which no devchat route uses. */
-function lockPort({ boardPort, appPort, httpsPort }: Settings) {
+function lockPort({ boardPort, appPort, httpsPort }: InstallSettings) {
   const port = boardPort + (boardPort <= 55_535 ? 10_000 : -10_000)
   if (port === appPort || port === httpsPort) throw new Error(`install locks the board on port ${port}, which --app-port or --https-port uses: pick other ports`)
   return port
 }
 
 export type InstallOptions = {
-  settings: Settings
+  settings: InstallSettings
   /** The Node binary to copy. It must link only system libraries. */
   nodeSource: string
   /** An npm `node_modules` holding `@filipgutica/devchat` and its dependencies. */
@@ -242,12 +242,17 @@ else
 fi`,
     },
     {
-      title: `Write the app's settings to ${configFile} (root:${account} 640)`,
+      title: `Write the app's settings to ${configFile} (root:${account} 640), ${describeLists(settings)}`,
       bash: `# Readable, so install can check the recorded routes before its sudo prompt; app.json stays 640.
 ensure_dir ${configDir} root root 755
-ensure_file ${configFile} root ${account} 640 <<'DEVCHAT_EOF'
-${JSON.stringify(settings, null, 2)}
-DEVCHAT_EOF
+# Only the service account and root can read app.json: the merge keeps its allowlist and machine map
+# where the flags left them out. It prints the settings on stdout and, on stderr, which fd 3 sends to
+# this script's output, the allowlist and machine map it wrote.
+exec 3>&1
+SETTINGS=$(${hostCliRun} settings-merge --config ${configFile} --update ${shq(JSON.stringify(settings))} 2>&3) \\
+  || fail 'could not read the installed settings'
+exec 3>&-
+ensure_file ${configFile} root ${account} 640 <<<"$SETTINGS"
 if [ "$FILE_CHANGED" = 1 ]; then RESTART=1; fi`,
     },
     {
