@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { z } from 'zod'
 import { channels } from '../shared/layout.ts'
 import { forgedTailnetClient, plainClient, type BoardRequester } from './board-http.ts'
-import { boardCli, boardUrl, hostPaths, ownerTokenFile, rootFileProblems, tailnetHost, unitNames, type Settings } from './settings.ts'
+import { boardCli, boardUrl, hostPaths, ownerTokenFile, rootFileProblems, tailnetHost, unitNames, type InstallSettings } from './settings.ts'
 
 export type CheckResult = { name: string; ok: boolean; detail: string }
 type Check = (name: string, ok: boolean, detail: string) => void
@@ -224,9 +224,10 @@ const appInfo = z.object({
   version: z.string().regex(/^[0-9A-Za-z.+-]{1,64}$/),
   board: z.object({ reachable: z.boolean() }).strict(),
   epoch: z.number().int().optional(),
+  inboxSchedulesCanceled: z.number().int().min(0),
 }).strict()
 
-async function checkApp(settings: Settings, check: Check) {
+async function checkApp(settings: InstallSettings, check: Check) {
   const response = await fetch(`http://127.0.0.1:${settings.appPort}/devchat.json`, { signal: AbortSignal.timeout(10_000) })
   let info: z.infer<typeof appInfo> | undefined
   try {
@@ -241,7 +242,7 @@ async function checkApp(settings: Settings, check: Check) {
 }
 
 /** The release 1 trust tests, run from the user's own account without sudo. */
-export async function verifyHost(settings: Settings, { expose }: { expose: boolean }) {
+export async function verifyHost(settings: InstallSettings, { expose }: { expose: boolean }) {
   const results: CheckResult[] = []
   const check: Check = (name, ok, detail) => { results.push({ name, ok, detail }) }
   const loopback = boardUrl(settings)

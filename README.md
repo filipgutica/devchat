@@ -12,7 +12,7 @@ Status: under construction. The client CLI ships as the `devchat` plugin in [fil
 
 ```sh
 npm install --ignore-scripts --prefix ~/devchat-host @filipgutica/devchat
-~/devchat-host/node_modules/.bin/devchat-host install --login user@example.com --host <host>.<tailnet>.ts.net
+~/devchat-host/node_modules/.bin/devchat-host install --login user@example.com --host <host>.<tailnet>.ts.net --allowlist <github-owner>
 ```
 
 The script:
@@ -25,6 +25,8 @@ The script:
 6. Starts the app on `127.0.0.1` and the daily export timer, which keeps 14 exports in `/var/lib/devchat/exports`.
 7. Only then runs `tailscale serve --bg --https=8443` for `/api/board` and `/`, and records them in `/etc/devchat/routes.json` once tailscale shows them. devchat needs its HTTPS port to itself: install refuses a port with any other route, Funnel, or a listener other than HTTPS, and says how to clear it. It removes devchat's old mounts from the recorded port. If a change fails, it stops and disables the board, confirms it, and prints the commands that remove devchat's routes. Pass `--no-expose` to skip this.
 
+`--allowlist <owner,...>` names the GitHub owners whose repos may appear on the board; the app refuses an intent for any other repo, and every repo when the list is empty. `--machine <name>=<T3 environment ID>`, repeated, maps each machine to its T3 environment, which the app records as a work item's `env`. Both go to `/etc/devchat/app.json`. A rerun without a flag keeps the installed value, and an empty value clears it (`--allowlist ''`). The plan shows what install writes.
+
 A second run changes nothing. An upgrade reruns `install` from a newer package.
 
 - `devchat-host verify --login … --host …` runs the trust checks from your own account, without `sudo`.
@@ -33,9 +35,10 @@ A second run changes nothing. An upgrade reruns `install` from a newer package.
 
 ### Known limits
 
-devchat's threat model is agent error under your own account, not a deliberate attacker (spec §13). These two gaps fall outside it.
+devchat's threat model is agent error under your own account, not a deliberate attacker (spec §13). These gaps fall outside it.
 
 | Limit | Why it is accepted |
 | --- | --- |
 | `install` is code your account can write, and it writes the script that runs as root. | You run `install` yourself and approve its one `sudo` prompt: the same trust as running any package with `sudo`. Review the script first with `--dry-run`. |
 | While the board is down, another local process could listen on its port and receive the owner token from the app or `vb`. | `vb serve` removes the token file on a clean stop. After a crash, `Restart=always` starts the board again within seconds with new keys, so a token taken from the old run is refused. The process could still serve made-up answers to the app until the board takes its port back. |
+| Deleting a root on the board while the app runs can leave a reply under the deleted root. | Release 1 has no delete path: only the owner, acting on the board directly, can delete. The app refuses a reply to a root that is already deleted when it looks the root up. |

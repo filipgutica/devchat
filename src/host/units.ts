@@ -1,4 +1,4 @@
-import { appMain, boardCli, hostCli, hostPaths, tailnetHost, unitNames, type Settings } from './settings.ts'
+import { appMain, boardCli, hostCli, hostPaths, tailnetHost, unitNames, type InstallSettings } from './settings.ts'
 
 /** Hardening shared by every devchat unit: no access to any home, and writes only in the state directory. */
 const sandbox = [
@@ -15,7 +15,7 @@ const sandbox = [
   'PrivateTmp=yes',
 ]
 
-export function boardServeArgs(settings: Settings, { tailnet }: { tailnet: boolean }) {
+export function boardServeArgs(settings: InstallSettings, { tailnet }: { tailnet: boolean }) {
   return [
     hostPaths.node, boardCli, 'serve',
     '--port', String(settings.boardPort),
@@ -29,7 +29,7 @@ const unit = (sections: Record<string, string[]>) =>
   Object.entries(sections).map(([name, lines]) => [`[${name}]`, ...lines].join('\n')).join('\n\n') + '\n'
 
 /** The systemd units install writes, by file name. */
-export function renderUnits(settings: Settings): Record<string, string> {
+export function renderUnits(settings: InstallSettings): Record<string, string> {
   return {
     [unitNames.board]: unit({
       Unit: ['Description=devchat board (vb serve, loopback only)', 'After=network.target'],

@@ -1,15 +1,17 @@
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
 import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { promisify } from 'node:util'
 import type { GrantView } from '@vercel/board'
 import { desiredGrants, lockProblems } from '../src/host/grants.ts'
 import { parseSelfName, parseServeStatus, planServe } from '../src/host/serve.ts'
-import { rootFileProblems, settingsSchema, type Settings } from '../src/host/settings.ts'
+import { listFlags, mergeSettings, rootFileProblems, settingsSchema, type Settings } from '../src/host/settings.ts'
 import { parseUnitShow } from '../src/host/verify.ts'
 
-const settings: Settings = { login: 'user@example.com', host: 'host.example.ts.net', httpsPort: 8443, boardPort: 4100, appPort: 4101 }
+const settings: Settings = { login: 'user@example.com', host: 'host.example.ts.net', httpsPort: 8443, boardPort: 4100, appPort: 4101, allowlist: [], machines: {} }
 /** A serve status with HTTPS listeners on every port the routes use, and Funnel on for `funnel`. */
 const web = (routes: Record<string, Record<string, string>>, { funnel = [] as string[], http = [] as string[] } = {}) => JSON.stringify({
   TCP: Object.fromEntries(Object.keys(routes).map((origin) => [origin.slice(origin.lastIndexOf(':') + 1), http.includes(origin) ? { HTTP: true } : { HTTPS: true }])),
@@ -118,6 +120,50 @@ test('a tailnet login is lowercased at input and must fit Board\'s login rule', 
   assert.equal(parse(' User@Example.COM ').data?.login, 'user@example.com')
   for (const login of ['user+tag@example.com', '.user@example.com', `${'a'.repeat(65)}@example.com`, 'user@', 'user']) {
     assert.equal(parse(login).success, false, login)
+  }
+})
+
+test('an app.json from before the allowlist parses with an empty allowlist and machine map', () => {
+  const { allowlist: _allowlist, machines: _machines, ...before } = settings
+  assert.deepEqual(settingsSchema.parse(before), { ...before, allowlist: [], machines: {} })
+  assert.equal(settingsSchema.safeParse({ ...settings, allowlist: ['owner/repo'] }).success, false)
+  assert.equal(settingsSchema.safeParse({ ...settings, extra: 1 }).success, false)
+  // The machine map becomes `env` labels: Board's label-value rule applies when settings are parsed.
+  for (const machines of [{ laptop: 'env-1\n' }, { 'lap\ttop': 'env-1' }, { laptop: '' }, { laptop: 'e'.repeat(257) }]) {
+    assert.equal(settingsSchema.safeParse({ ...settings, machines }).success, false, JSON.stringify(machines))
+  }
+})
+
+test('install flags: an absent --allowlist or --machine keeps the installed value, a given one replaces it, an empty one clears it', () => {
+  const { allowlist: _allowlist, machines: _machines, ...ports } = settings
+  const installed: Settings = { ...settings, allowlist: ['example'], machines: { laptop: 'env-1' } }
+  const merge = (flags: Parameters<typeof listFlags>[0]) => mergeSettings({ ...ports, ...listFlags(flags) }, installed)
+  assert.deepEqual(merge({}), installed)
+  assert.deepEqual(merge({ allowlist: 'other, Third', machine: ['desktop=env-2'] }),
+    { ...installed, allowlist: ['other', 'Third'], machines: { desktop: 'env-2' } })
+  assert.deepEqual(merge({ allowlist: '', machine: [''] }), { ...installed, allowlist: [], machines: {} })
+  assert.deepEqual(mergeSettings(ports, null), { ...ports, allowlist: [], machines: {} })
+  assert.throws(() => listFlags({ machine: ['laptop'] }), /<name>=<T3 environment ID>/)
+})
+
+test('settings-merge, as the root script runs it, reads app.json only when root alone can change it', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'devchat-settings-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const { allowlist: _allowlist, machines: _machines, ...ports } = settings
+  const merge = (config: string, update: object = ports) => promisify(execFile)(process.execPath,
+    [new URL('../src/host/cli.ts', import.meta.url).pathname, 'settings-merge', '--config', config, '--update', JSON.stringify(update)])
+
+  // A first install has no app.json.
+  const first = await merge(join(dir, 'app.json'), { ...ports, allowlist: ['example'] })
+  assert.deepEqual(JSON.parse(first.stdout), { ...ports, allowlist: ['example'], machines: {} })
+  assert.equal(first.stderr, '  allowlist: example; machines: empty\n')
+  // One this account owns, or a link, is refused and named, and nothing is printed for root to write.
+  const owned = join(dir, 'owned.json')
+  await writeFile(owned, first.stdout)
+  await symlink(owned, join(dir, 'link.json'))
+  for (const [config, problem] of [[owned, `${owned} is not root-owned`], [join(dir, 'link.json'), 'is not a regular file']] as const) {
+    await assert.rejects(merge(config), (error: { stdout: string; stderr: string }) =>
+      error.stdout === '' && error.stderr.includes(`not trusting ${config}`) && error.stderr.includes(problem))
   }
 })
 

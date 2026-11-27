@@ -8,7 +8,7 @@ import { installSteps, renderPlan, renderScript, uninstallSteps } from '../src/h
 import type { Settings } from '../src/host/settings.ts'
 import { renderUnits } from '../src/host/units.ts'
 
-const settings: Settings = { login: 'user@example.com', host: 'host.example.ts.net', httpsPort: 8443, boardPort: 4100, appPort: 4101 }
+const settings: Settings = { login: 'user@example.com', host: 'host.example.ts.net', httpsPort: 8443, boardPort: 4100, appPort: 4101, allowlist: [], machines: {} }
 const sources = {
   nodeSource: '/home/user/.nvm/versions/node/v24.0.0/bin/node',
   modulesSource: "/tmp/it's here/node_modules",
@@ -17,6 +17,15 @@ const sources = {
 }
 
 const bash = (script: string, input = '') => spawnSync('bash', ['-c', script], { input, encoding: 'utf8' })
+
+test('the install plan shows the allowlist and machine map it writes, or that it keeps the installed ones', () => {
+  const { allowlist: _allowlist, machines: _machines, ...ports } = settings
+  assert.match(renderPlan(installSteps({ settings: { ...settings, allowlist: ['example'], machines: { laptop: 'env-1' } }, ...sources, expose: true })),
+    /app\.json \(root:devchat 640\), allowlist: example; machines: laptop=env-1$/m)
+  assert.match(renderPlan(installSteps({ settings, ...sources, expose: true })), /allowlist: empty, so every repo is refused; machines: empty$/m)
+  assert.match(renderPlan(installSteps({ settings: ports, ...sources, expose: true })),
+    /allowlist: kept from the installed app\.json, empty on a first install; machines: kept from the installed app\.json/)
+})
 
 test('install closes the default grants before the board serves the tailnet, and exposes last', () => {
   const steps = installSteps({ settings, ...sources, expose: true })

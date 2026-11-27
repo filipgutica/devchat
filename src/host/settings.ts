@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { lstat, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
+import { labelValue } from '../shared/layout.ts'
 
 /** Fixed host layout: §5 and §8 of the spec. Nothing here comes from the user's home. */
 export const hostPaths = {
@@ -36,8 +37,19 @@ export const unitNames = {
 
 const port = z.number().int().min(1).max(65_535)
 
-/** The app's settings, written to `/etc/devchat/app.json` (root:devchat 640). */
-export const settingsSchema = z.object({
+/**
+ * GitHub owners whose repos may appear on the board (§5). An intent's `repo` must be
+ * `<owner>/<repo>` with its owner here, ignoring case. Empty refuses every repo.
+ */
+const allowlist = z.array(z.string().regex(/^[A-Za-z0-9-]{1,39}$/, 'a GitHub owner such as octocat'))
+/** Machine name to T3 environment ID: the app sets a work item's `env` label from it (§2). */
+const machines = z.record(labelValue, labelValue)
+
+/**
+ * The settings install and verify take. Without an allowlist or machine map, install keeps the
+ * ones `/etc/devchat/app.json` holds (`mergeSettings`).
+ */
+export const installSettingsSchema = z.object({
   // Board lowercases a tailnet login and keeps it as an ID only in this shape (Board 0.56.1's LOGIN
   // rule). Checking it here refuses a login before install writes anything; it is also shell-safe.
   login: z.string().trim().toLowerCase()
@@ -46,9 +58,51 @@ export const settingsSchema = z.object({
   httpsPort: port,
   boardPort: port,
   appPort: port,
+  allowlist: allowlist.optional(),
+  machines: machines.optional(),
+}).strict()
+
+export type InstallSettings = z.infer<typeof installSettingsSchema>
+
+/** The app's settings, written to `/etc/devchat/app.json` (root:devchat 640). */
+export const settingsSchema = installSettingsSchema.extend({
+  allowlist: allowlist.default([]),
+  machines: machines.default({}),
 }).strict()
 
 export type Settings = z.infer<typeof settingsSchema>
+
+/**
+ * The allowlist and machine map from install's flags: an absent flag gives none, so install keeps
+ * the installed value, and an empty one clears it.
+ */
+export function listFlags({ allowlist, machine }: { allowlist?: string | undefined; machine?: string[] | undefined }) {
+  const entries = machine?.filter(Boolean).map((entry) => {
+    const split = entry.indexOf('=')
+    if (split < 1) throw new Error(`--machine ${entry}: use <name>=<T3 environment ID>`)
+    return [entry.slice(0, split), entry.slice(split + 1)] as const
+  })
+  return {
+    ...(allowlist === undefined ? {} : { allowlist: allowlist.split(',').map((owner) => owner.trim()).filter(Boolean) }),
+    ...(entries === undefined ? {} : { machines: Object.fromEntries(entries) }),
+  }
+}
+
+/** The settings install writes: `update`, with the installed allowlist and machine map where it has none. */
+export const mergeSettings = (update: InstallSettings, current: Settings | null): Settings => settingsSchema.parse({
+  ...update,
+  allowlist: update.allowlist ?? current?.allowlist,
+  machines: update.machines ?? current?.machines,
+})
+
+/** The allowlist and machine map install writes, for its plan and its run. */
+export function describeLists({ allowlist, machines }: Pick<InstallSettings, 'allowlist' | 'machines'>) {
+  const kept = 'kept from the installed app.json, empty on a first install'
+  const list = allowlist === undefined ? kept : allowlist.join(', ') || 'empty, so every repo is refused'
+  const map = machines === undefined ? kept
+    : Object.entries(machines).map(([name, env]) => `${name}=${env}`).join(', ') || 'empty'
+  return `allowlist: ${list}; machines: ${map}`
+}
 
 export const defaultPorts = { httpsPort: 8443, boardPort: 4100, appPort: 4101 } as const
 

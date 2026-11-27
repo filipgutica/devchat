@@ -15,6 +15,13 @@ export const channels = {
 /** The board marker in `sys`, posted once by host setup with `epoch=1`. */
 export const boardMarker = { id: 'board', channel: channels.sys } as const
 
+/** The app marker in `inbox`: its `applied` label is the message ID of the last `inbox` post the app handled. */
+export const appMarker = { id: 'app', channel: channels.inbox } as const
+
+/** The values of `refused` on an `inbox` post the app rejected; docs/layout.md says what each means. */
+export const refusalReasons = ['reply', 'json', 'deferred', 'invalid', 'rid', 'repo', 'root', 'profile', 'pr', 'pending'] as const
+export type RefusalReason = typeof refusalReasons[number]
+
 export const labelKeys = [
   'rid', 'status', 'host', 'repo', 'work', 'kind', 'issue', 'machine', 'env',
   'thread', 'ask', 'turn', 'pushed', 'by', 'fwd', 'dest', 'every', 'last', 'src',
@@ -32,12 +39,17 @@ export const deferredIntentKinds = ['msg', 'queue', 'ack', 'react'] as const
 // A canonical Board client ID adds the four-character app: prefix to the intent's rid. A rid is
 // also a label value and a label-query term, so it excludes `|`, which Board reads as OR.
 export const rid = z.string().max(196).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, 'A rid uses letters, digits, and . _ : -')
+const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
 // Fields the app copies into labels must fit Board's label values: 1 to 256 characters, with no
-// control characters and no lone surrogates.
-const labelValue = z.string().min(1).max(256)
+// control characters and no lone surrogates. The host's settings use it for the machine map too.
+export const labelValue = z.string().min(1).max(256)
   .refine((value) => !/\p{Cc}/u.test(value), 'A label value has no control characters')
-  .refine((value) => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(value), 'A label value has no lone surrogates')
-const text = z.string().refine((value) => value.trim().length > 0, 'Post text is required')
+  .refine((value) => !loneSurrogate.test(value), 'A label value has no lone surrogates')
+// Board 0.56.1 stores a message text of at most 10,000 characters, not blank, with no NUL and no
+// lone surrogate: anything else it refuses after the intent was accepted.
+const text = z.string().max(10_000)
+  .refine((value) => value.trim().length > 0, 'Post text is required')
+  .refine((value) => !value.includes('\0') && !loneSurrogate.test(value), 'Post text has no NUL and no lone surrogates')
 const base = {
   v: z.literal(1),
   rid,
@@ -77,7 +89,8 @@ export const intentSchema = z.discriminatedUnion('kind', [
     ...reply,
     kind: z.literal('note'),
     text,
-    pr: z.url().optional(),
+    // The app copies it into a `pr.<n>` label.
+    pr: labelValue.pipe(z.url()).optional(),
   }),
   z.strictObject({
     ...reply,

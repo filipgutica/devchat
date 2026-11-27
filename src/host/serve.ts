@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { boardUrl, settingsSchema, type Settings } from './settings.ts'
+import { boardUrl, settingsSchema, type InstallSettings } from './settings.ts'
 
 const listeners = {
   TCP: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
@@ -53,7 +53,7 @@ type PlanOptions = {
  * node's live name `self`, on the recorded or the current port, with devchat's path and target.
  * With `remove`, the plan lists those mounts only, and skips the `--host` check.
  */
-export function planServe(status: z.infer<typeof serveStatus>, settings: Settings, self: string, { recorded, remove = false }: PlanOptions = {}) {
+export function planServe(status: z.infer<typeof serveStatus>, settings: InstallSettings, self: string, { recorded, remove = false }: PlanOptions = {}) {
   if (!remove && settings.host.toLowerCase() !== self) {
     throw new Error(`--host ${settings.host} is not this node's tailnet name, ${self}: tailscale serves ${self}, so rerun with --host ${self}`)
   }

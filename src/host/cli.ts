@@ -12,14 +12,20 @@ import { exportBoard } from './export.ts'
 import { boardLockProblems, lockBoard, setupBoard } from './grants.ts'
 import { parseSelfName, parseServeStatus, planServe, routesSchema, type Routes } from './serve.ts'
 import { installSteps, renderPlan, renderScript, uninstallSteps, type Step } from './script.ts'
-import { boardUrl, defaultPorts, hostPaths, readSettings, rootFileProblems, settingsSchema, unitNames, type Settings } from './settings.ts'
+import {
+  boardUrl, defaultPorts, describeLists, hostPaths, installSettingsSchema, listFlags, mergeSettings, readSettings, rootFileProblems,
+  settingsSchema, unitNames, type InstallSettings,
+} from './settings.ts'
 import { verifyHost } from './verify.ts'
 
 const usage = `usage: devchat-host <command> [options]
 
   install     set up the devchat host with one sudo prompt (prints every step first)
               --login <tailnet login> --host <name>.ts.net [--https-port 8443]
-              [--board-port 4100] [--app-port 4101] [--node <path>] [--no-expose] [--dry-run]
+              [--board-port 4100] [--app-port 4101] [--allowlist <owner,...>]
+              [--machine <name>=<T3 environment ID>]... [--node <path>] [--no-expose] [--dry-run]
+              Without --allowlist or --machine, install keeps the installed value; an empty
+              value clears it (--allowlist '').
   verify      run the release 1 trust checks from your own account, without sudo
               --login <tailnet login> --host <name>.ts.net [ports as install] [--no-expose]
   status      show the services and what the app reports   [--app-port 4101] [--wait <seconds>]
@@ -34,6 +40,8 @@ const settingFlags = {
   'https-port': { type: 'string' },
   'board-port': { type: 'string' },
   'app-port': { type: 'string' },
+  allowlist: { type: 'string' },
+  machine: { type: 'string', multiple: true },
   'no-expose': { type: 'boolean' },
 } as const
 
@@ -47,14 +55,20 @@ async function ask(question: string) {
   }
 }
 
-async function resolveSettings(values: { login?: string; host?: string; 'https-port'?: string; 'board-port'?: string; 'app-port'?: string }): Promise<Settings> {
+type SettingValues = {
+  login?: string; host?: string; 'https-port'?: string; 'board-port'?: string; 'app-port'?: string
+  allowlist?: string; machine?: string[]
+}
+
+async function resolveSettings(values: SettingValues): Promise<InstallSettings> {
   const port = (value: string | undefined, fallback: number) => (value === undefined ? fallback : Number(value))
-  return settingsSchema.parse({
+  return installSettingsSchema.parse({
     login: values.login ?? await ask('Tailnet login (user@example.com): '),
     host: values.host ?? await ask('Host name on the tailnet (<host>.<tailnet>.ts.net): '),
     httpsPort: port(values['https-port'], defaultPorts.httpsPort),
     boardPort: port(values['board-port'], defaultPorts.boardPort),
     appPort: port(values['app-port'], defaultPorts.appPort),
+    ...listFlags(values),
   })
 }
 
@@ -218,6 +232,25 @@ async function main(argv: string[]) {
         return problems.length === 0 ? 0 : 1
       }
       await (values.lock ? lockBoard : setupBoard)(handle, settings.login, (line) => console.log(line))
+      return 0
+    }
+    // Prints the settings install writes: these flags, with the installed allowlist and machine map
+    // where the flags leave them out. The root script runs it as the service account, which can read app.json.
+    case 'settings-merge': {
+      const { values } = parseArgs({ args: rest, options: { config: { type: 'string' }, update: { type: 'string' } } })
+      const update = installSettingsSchema.parse(JSON.parse(values.update ?? 'null'))
+      const config = values.config ?? hostPaths.configFile
+      // Its allowlist and machine map flow into the settings root writes: only a root-owned regular
+      // file that only root can change is trusted. A first install has none.
+      const problems = await rootFileProblems(config).catch((error: unknown) => {
+        if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return null
+        throw error
+      })
+      if (problems && problems.length > 0) throw new Error(`not trusting ${config}: ${problems.join('; ')}`)
+      const current = problems ? await readSettings(config) : null
+      const settings = mergeSettings(update, current)
+      console.error(`  ${describeLists(settings)}`)
+      console.log(JSON.stringify(settings, null, 2))
       return 0
     }
     case 'serve-plan': {

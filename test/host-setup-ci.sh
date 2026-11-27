@@ -67,6 +67,18 @@ grep -q 'Done: 0 change(s).' <<<"$rerun"
 after=$(snapshot)
 diff <(printf '%s\n' "$before") <(printf '%s\n' "$after")
 
+section 'install keeps the allowlist and machine map without their flags; an empty flag clears them'
+lists() { sudo cat /etc/devchat/app.json | node -e 'let t = ""; process.stdin.on("data", (c) => { t += c }).on("end", () => { const s = JSON.parse(t); console.log(JSON.stringify([s.allowlist, s.machines])) })'; }
+"$bin" install --no-expose "${settings[@]}" --allowlist Example --machine laptop=env-1
+[ "$(lists)" = '[["Example"],{"laptop":"env-1"}]' ] || die "install wrote $(lists)"
+kept=$("$bin" install --no-expose "${settings[@]}")
+printf '%s\n' "$kept"
+grep -q 'allowlist: Example; machines: laptop=env-1' <<<"$kept"
+grep -q 'Done: 0 change(s).' <<<"$kept"
+[ "$(lists)" = '[["Example"],{"laptop":"env-1"}]' ] || die "a rerun without the flags wrote $(lists)"
+"$bin" install --no-expose "${settings[@]}" --allowlist '' --machine ''
+[ "$(lists)" = '[[],{}]' ] || die "empty flags wrote $(lists)"
+
 section 'a board restart mints a new owner token, and the app keeps working'
 app_pid=$(main_pid devchat-app.service)
 board_pid=$(main_pid devchat-board.service)
