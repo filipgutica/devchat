@@ -177,26 +177,25 @@ board_setup() {
   APPLIED=$((APPLIED + $(printf '%s\\n' "$out" | grep -c '^applied:' || true)))
 }
 ${serveHelpers(setRoutes)}
-# Stops the export timer and the board (the app with it, through PartOf), and succeeds only when
-# systemd reports all three inactive.
-stop_board() {
-  local unit state
-  run systemctl stop ${exportTimer} ${board} || true
+# Stops and disables the export timer, the board, and the app, so neither the timer nor a reboot
+# starts them, and succeeds only when systemd reports each one inactive and disabled.
+disable_board() {
+  local unit state enabled
+  run systemctl disable --now ${exportTimer} ${board} ${app} || true
   for unit in ${exportTimer} ${board} ${app}; do
     state=$(systemctl show -p ActiveState --value "$unit") || return 1
-    case "$state" in
-      inactive|failed) ;;
-      *) printf 'error: %s is %s\\n' "$unit" "$state" >&2; return 1 ;;
-    esac
+    enabled=$(systemctl is-enabled "$unit" 2>/dev/null) || true
+    case "$state" in inactive|failed) ;; *) printf 'error: %s is %s\\n' "$unit" "$state" >&2; return 1 ;; esac
+    [ "$enabled" = disabled ] || { printf 'error: %s is %s at boot\\n' "$unit" "\${enabled:-unknown}" >&2; return 1; }
   done
 }
 # The one way out of a failure after the routes changed: a route to a stopped board reaches
 # nothing, so this stops the board, confirms it, and names the commands that remove the routes.
 routes_failed() {
   printf 'error: %s\\n' "$1" >&2
-  stop_board || fail 'the board could not be confirmed stopped: run systemctl stop ${exportTimer} ${board}, then check systemctl status ${board}'
-  applied 'stopped ${exportTimer}, ${board}, and ${app}, confirmed inactive'
-  fail "the board is stopped, so devchat's routes reach nothing. Remove them with: ${removalCommands(String(settings.httpsPort))}; then rerun install"
+  disable_board || fail 'the board could not be confirmed stopped and disabled: run systemctl disable --now ${exportTimer} ${board} ${app}'
+  applied 'stopped and disabled ${exportTimer}, ${board}, and ${app}, confirmed'
+  fail "the board is stopped and disabled, so devchat's routes reach nothing. Remove them with: ${removalCommands(String(settings.httpsPort))}; then rerun install"
 }`,
     },
     {
@@ -263,25 +262,27 @@ if [ "$UNITS_CHANGED" = 1 ]; then run systemctl daemon-reload; RESTART=1; fi`,
       title: `Before the board serves the tailnet with these units: lock it, on loopback only, as ${account}`,
       bash: `# Board's default grant g1 lets a forged loopback tailnet header manage a board served with
 # --tailscale. The board is safe while it is locked or stopped, whatever routes point at it: a board
-# that is not running locked stops, confirmed, and is locked on loopback on port ${lock}, which no
-# route points to. Only then does the next step start it with --tailscale.
+# that is not running locked is stopped and disabled, confirmed, so not even a reboot starts it, and
+# is locked on loopback on port ${lock}, which no route points to. Only then are its units enabled
+# again, and the next step starts it with --tailscale. Every failure here leaves it disabled.
 if systemctl is-active --quiet ${board} && board_setup --lock-check; then
   unchanged 'board locked'
 else
-  stop_board || fail 'the board is not locked and could not be confirmed stopped: run systemctl stop ${exportTimer} ${board}'
-  applied 'stopped ${exportTimer}, ${board}, and ${app}, confirmed inactive'
-  if (exec 3<>/dev/tcp/127.0.0.1/${lock}) 2>/dev/null; then fail 'port ${lock}, where install locks the board, is in use; the board stays stopped'; fi
+  disable_board || fail 'the board is not locked and could not be confirmed stopped and disabled: run systemctl disable --now ${exportTimer} ${board} ${app}'
+  applied 'stopped and disabled ${exportTimer}, ${board}, and ${app}, confirmed'
+  if (exec 3<>/dev/tcp/127.0.0.1/${lock}) 2>/dev/null; then fail 'port ${lock}, where install locks the board, is in use; the board stays stopped and disabled'; fi
   if command -v tailscale >/dev/null; then
-    routes=$(tailscale serve status --json) || fail 'tailscale serve status failed; the board stays stopped'
-    case "$routes" in *:${lock}[\\"/]*) fail 'a tailscale serve route points at port ${lock}; the board stays stopped' ;; esac
+    routes=$(tailscale serve status --json) || fail 'tailscale serve status failed; the board stays stopped and disabled'
+    case "$routes" in *:${lock}[\\"/]*) fail 'a tailscale serve route points at port ${lock}; the board stays stopped and disabled' ;; esac
   fi
   printf '  $ %s &\\n' ${shq(bootstrap)}
   "\${AS_DEVCHAT[@]}" ${bootstrap} >/dev/null 2>&1 &
   BOOT_PID=$!
   trap 'kill "$BOOT_PID" 2>/dev/null || true' EXIT
-  board_setup --lock --board-port ${lock} || fail 'locking the board failed; it stays stopped'
-  kill "$BOOT_PID"; wait "$BOOT_PID" 2>/dev/null || true
+  board_setup --lock --board-port ${lock} || fail 'locking the board failed; it stays stopped and disabled'
+  kill "$BOOT_PID" 2>/dev/null || true; wait "$BOOT_PID" 2>/dev/null || true
   trap - EXIT
+  run systemctl enable ${exportTimer} ${board} ${app}; applied 'board locked; enabled ${exportTimer}, ${board}, and ${app} again'
 fi`,
     },
     {

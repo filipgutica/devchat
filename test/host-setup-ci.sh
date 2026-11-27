@@ -49,7 +49,7 @@ vb grants create --everyone --can '*=read'
 relock=$("$bin" install --no-expose "${settings[@]}")
 printf '%s\n' "$relock"
 grep -q "not locked: g[0-9]* is not one of devchat's grants" <<<"$relock"
-grep -q 'applied: stopped devchat-export.timer, devchat-board.service' <<<"$relock"
+grep -q 'applied: stopped and disabled devchat-export.timer, devchat-board.service, and devchat-app.service, confirmed' <<<"$relock"
 as_devchat /opt/devchat/bin/node "$host_cli" board-setup --config /etc/devchat/app.json --lock-check
 
 section 'seed one root in each read-only channel as the service account, so verify can probe reply and label'

@@ -35,7 +35,7 @@ test('install closes the default grants before the board serves the tailnet, and
   assert.equal(serves.length, 2)
   for (const line of serves) assert.match(line, /serve --port 14100 .*--no-inspect'?( >\/dev\/null 2>&1 &)?$/)
   // A board that is not running locked stops, confirmed, before the lock; no route is touched.
-  assert.match(steps[lock]?.bash ?? '', /board_setup --lock-check[\s\S]*stop_board \|\| fail[\s\S]*board_setup --lock --board-port 14100/)
+  assert.match(steps[lock]?.bash ?? '', /board_setup --lock-check[\s\S]*disable_board \|\| fail[\s\S]*board_setup --lock --board-port 14100[\s\S]*systemctl enable/)
   assert.doesNotMatch(steps[lock]?.bash ?? '', /apply_serve_plan|serve_plan/)
 })
 
@@ -143,43 +143,54 @@ function runStep(pattern: RegExp, stubs: string) {
   }
 }
 
-/** systemctl stubs: the board runs, and `systemctl show` reports `state` for every unit. */
-const systemctl = (state: string) => `systemctl() { case "$1" in is-active) return 0 ;; show) echo ${state} ;; *) echo "systemctl $*" ;; esac; }`
+/** systemctl stubs: the board runs, and systemd reports `state` and `enabled` for every unit. */
+const systemctl = (state: string, enabled = 'disabled') =>
+  `systemctl() { case "$1" in is-active) return 0 ;; show) echo ${state} ;; is-enabled) echo ${enabled} ;; *) echo "systemctl $*" ;; esac; }`
+const disabled = /systemctl disable --now devchat-export\.timer devchat-board\.service devchat-app\.service[\s\S]*stopped and disabled [^\n]*, confirmed/
 
-test('a board that is not locked stops, confirmed, and is locked on loopback without touching any route', () => {
-  const relock = (state: string, tailscale: string) => runStep(/lock it, on loopback only/, `
-${systemctl(state)}
+test('a board that is not locked is stopped and disabled, confirmed, and locked on loopback without touching any route', () => {
+  const relock = (tailscale: string, state = 'inactive', enabled = 'disabled') => runStep(/lock it, on loopback only/, `
+${systemctl(state, enabled)}
 board_setup() { echo "board_setup $*"; [ "$1" != --lock-check ]; }
+AS_DEVCHAT=(env)
 tailscale() { ${tailscale}; }`)
-  // tailscale serve status fails: the board stays stopped, and install fails without a relock.
-  const noStatus = relock('inactive', 'return 1')
+  // Any failed relock leaves all three units stopped and disabled, so no reboot starts them.
+  const noStatus = relock('return 1')
   assert.equal(noStatus.status, 1)
-  assert.match(noStatus.stdout, /systemctl stop devchat-export\.timer devchat-board\.service[\s\S]*confirmed inactive/)
-  assert.match(noStatus.stderr, /tailscale serve status failed; the board stays stopped/)
-  assert.doesNotMatch(noStatus.stdout, /board_setup --lock |cli\.mjs serve|systemctl (start|restart)/)
-  // A route at the lock port also stops it.
-  const routed = relock('inactive', `echo '{"Web":{"h:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:14100"}}}}}'`)
+  assert.match(noStatus.stdout, disabled)
+  assert.match(noStatus.stderr, /tailscale serve status failed; the board stays stopped and disabled/)
+  assert.doesNotMatch(noStatus.stdout, /board_setup --lock |systemctl (enable|start|restart)/)
+  const routed = relock(`echo '{"Web":{"h:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:14100"}}}}}'`)
   assert.equal(routed.status, 1)
-  assert.match(routed.stderr, /a tailscale serve route points at port 14100/)
-  // A board systemd does not report stopped is never relocked, and install says so.
-  const running = relock('active', 'return 1')
-  assert.equal(running.status, 1)
-  assert.match(running.stderr, /devchat-export\.timer is active[\s\S]*could not be confirmed stopped/)
-  assert.doesNotMatch(running.stdout, /confirmed inactive|board_setup --lock /)
+  assert.match(routed.stdout, disabled)
+  assert.match(routed.stderr, /a tailscale serve route points at port 14100; the board stays stopped and disabled/)
+  assert.doesNotMatch(routed.stdout, /systemctl enable/)
+  // A unit systemd does not report stopped and disabled is never relocked, and install says so.
+  for (const [state, enabled, problem] of [['active', 'disabled', /devchat-export\.timer is active/], ['inactive', 'enabled', /devchat-export\.timer is enabled at boot/]] as const) {
+    const result = relock('return 1', state, enabled)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, problem)
+    assert.match(result.stderr, /could not be confirmed stopped and disabled/)
+    assert.doesNotMatch(result.stdout, /, confirmed|board_setup --lock |systemctl enable/)
+  }
+  // A successful relock enables the units again only after the lock.
+  const locked = relock(`echo '{}'`)
+  assert.equal(locked.status, 0, locked.stderr)
+  assert.match(locked.stdout, new RegExp(`${disabled.source}[\\s\\S]*board_setup --lock --board-port 14100\\n[\\s\\S]*systemctl enable devchat-export\\.timer devchat-board\\.service devchat-app\\.service`))
 })
 
-test('a failure after the routes change stops the board, confirmed, and names the commands that remove its routes', () => {
+test('a failure after the routes change stops and disables the board, confirmed, and names the commands that remove its routes', () => {
   const expose = (state: string) => runStep(/^Only now, expose/, `
 ${systemctl(state)}
 serve_plan() { echo set; }
 tailscale() { echo "tailscale $*"; case "$*" in *'--set-path=/ http'*) return 1 ;; esac; }`)
   const stopped = expose('inactive')
   assert.equal(stopped.status, 1)
-  assert.match(stopped.stdout, /systemctl stop devchat-export\.timer devchat-board\.service[\s\S]*confirmed inactive/)
-  assert.match(stopped.stderr, /applying the tailnet routes failed[\s\S]*the board is stopped, so devchat's routes reach nothing\. Remove them with: tailscale serve --https=8443 --set-path=\/api\/board off; tailscale serve --https=8443 --set-path=\/ off/)
+  assert.match(stopped.stdout, disabled)
+  assert.match(stopped.stderr, /applying the tailnet routes failed[\s\S]*the board is stopped and disabled, so devchat's routes reach nothing\. Remove them with: tailscale serve --https=8443 --set-path=\/api\/board off; tailscale serve --https=8443 --set-path=\/ off/)
   assert.doesNotMatch(stopped.stdout, / off$/m)
   const running = expose('active')
   assert.equal(running.status, 1)
-  assert.match(running.stderr, /could not be confirmed stopped/)
-  assert.doesNotMatch(running.stderr + running.stdout, /the board is stopped|confirmed inactive/)
+  assert.match(running.stderr, /could not be confirmed stopped and disabled/)
+  assert.doesNotMatch(running.stderr + running.stdout, /the board is stopped|, confirmed/)
 })
