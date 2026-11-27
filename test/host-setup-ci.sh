@@ -98,6 +98,16 @@ systemctl is-active devchat-app.service
 "$bin" status --wait 30
 "$bin" verify --no-expose "${settings[@]}"
 
+section 'the installed app serves the web UI'
+# The package ships dist/ui, and the app serves it at / with its policy; the page loads its script.
+page=$(curl -fsS -D "$RUNNER_TEMP/ui-headers" http://127.0.0.1:4101/)
+grep -qi '^content-type: text/html' "$RUNNER_TEMP/ui-headers" || die 'the app did not serve the UI page as HTML'
+grep -qi "^content-security-policy: .*script-src 'self'" "$RUNNER_TEMP/ui-headers" || die 'the UI page has no content security policy'
+script=$(printf '%s' "$page" | grep -o '/assets/[^"]*\.js' | head -1)
+[ -n "$script" ] || die 'the UI page names no script'
+curl -fsS -o /dev/null "http://127.0.0.1:4101$script" || die "the app did not serve $script"
+echo "the app serves / and $script"
+
 section 'the export timer writes a private export that holds the board'
 systemctl is-enabled devchat-export.timer
 sudo systemctl start devchat-export.service
