@@ -280,7 +280,7 @@ test('Ingest: a replay folds the thread of an intent already written before appl
   assert.equal((await host.rootLabels('work-1')).status, 'blocked')
 })
 
-test('Ingest: a 400 from Board on a canonical post refuses that intent and moves on; a 5xx stops the pass and retries it', async (t) => {
+test('Ingest: a 400 from Board on a canonical post refuses that intent as invalid, and a 409 duplicate_id as rid, and moves on; a 5xx stops the pass and retries it', async (t) => {
   const host = await startHost(t)
   await host.submit(work('work-1'))
   await host.writer().pass()
@@ -294,6 +294,16 @@ test('Ingest: a 400 from Board on a canonical post refuses that intent and moves
   assert.equal(await host.canonical('note-1'), null)
   assert.ok(await host.canonical('note-2'))
   assert.equal(await host.applied(), inbox.at(-1)?.id)
+
+  // A client ID another author holds: the app's lookup finds nothing, and Board answers 409.
+  const duplicate = new BoardError('duplicate_id', 'stubbed collision', 409)
+  const takenRoot = await host.submit(work('work-taken'))
+  const takenReply = await host.submit({ ...base, rid: 'note-taken', kind: 'note', root: 'work-1', text: 'Taken.' })
+  await createStateWriter({ settings: { allowlist: ['example'], machines: {} }, stateFile: host.stateFile,
+    openBoard: () => failing(failing(board(), 'app:work-taken', duplicate), 'app:note-taken', duplicate) }).pass()
+  const taken = await host.messages('inbox')
+  assert.deepEqual([takenRoot, takenReply].map((id) => taken.find((message) => message.id === id)?.labels.refused), ['rid', 'rid'])
+  assert.equal(await host.applied(), takenReply)
 
   const retried = await host.submit({ ...base, rid: 'note-3', kind: 'note', root: 'work-1', text: 'Board is down.' })
   const before = await host.applied()

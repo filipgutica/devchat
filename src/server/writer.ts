@@ -90,19 +90,20 @@ const isAllowlisted = (repo: string, allowlist: readonly string[]) => {
 const prNumber = (url: string) => /\/pull\/(\d{1,9})\/?$/.exec(new URL(url).pathname)?.[1] ?? null
 
 /**
- * A canonical write, or null when Board answers 400: it refused that post as given and wrote
- * nothing, so the intent is refused and the queue moves on. Any other error ends the pass, and the
- * next pass retries the same intent.
+ * A canonical write, or why Board refused it for good, having written nothing: `invalid` for a 400,
+ * the post as given, and `taken` for a 409 `duplicate_id`, its client ID held by a post of another
+ * author, which the app cannot see. Either way the write is refused and the queue moves on. Any
+ * other error ends the pass, and the next pass retries the same intent.
  */
-async function writeCanonical(write: () => Promise<MessageView>) {
+async function writeCanonical(write: () => Promise<MessageView>): Promise<MessageView | 'invalid' | 'taken'> {
   try {
     return await write()
   } catch (error) {
-    if (error instanceof BoardError && error.status === 400) {
-      console.error(`devchat: board refused a canonical post (${error.code}): ${error.message}`)
-      return null
-    }
-    throw error
+    if (!(error instanceof BoardError)) throw error
+    const refused = error.status === 400 ? 'invalid' : error.status === 409 && error.code === 'duplicate_id' ? 'taken' : null
+    if (!refused) throw error
+    console.error(`devchat: board refused a canonical post (${error.code}): ${error.message}`)
+    return refused
   }
 }
 
@@ -198,7 +199,7 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
   async function writeRoot(port: BoardPort, intent: Extract<Intent, { kind: 'todo' | 'work' }>, post: { text: string; labels: Labels }) {
     if (intent.repo !== undefined && !isAllowlisted(intent.repo, settings.allowlist)) return 'repo'
     const root = await writeCanonical(() => port.post(intent.channel, { id: `app:${intent.rid}`, ...post }))
-    if (!root) return 'invalid'
+    if (typeof root === 'string') return root === 'taken' ? 'rid' : root
     await foldThread(port, root.id)
     return null
   }
@@ -211,7 +212,8 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
       const state = await foldThread(port, target.id)
       if (state.ask === 'answered' && intent.re !== state.turn) return 'pending'
     }
-    if (!await writeCanonical(() => port.reply(target.id, { id: `app:${intent.rid}`, ...post }))) return 'invalid'
+    const reply = await writeCanonical(() => port.reply(target.id, { id: `app:${intent.rid}`, ...post }))
+    if (typeof reply === 'string') return reply === 'taken' ? 'rid' : reply
     await foldThread(port, target.id)
     return null
   }
@@ -331,7 +333,7 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
     if (refused) return { refused }
     const { channel, parent, ...content } = post
     const message = await writeCanonical(() => (parent ? port.reply(parent, { id, ...content }) : port.post(channel, { id, ...content })))
-    if (!message) return { refused: 'invalid' }
+    if (typeof message === 'string') return { refused: message === 'taken' ? 'conflict' : message }
     return { rid: write.rid, state: await foldThread(port, parent ?? message.id), replayed: false }
   }
 

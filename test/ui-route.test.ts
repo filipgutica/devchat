@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test, type TestContext } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
-import { board, type Board, type MessageView } from '@vercel/board'
+import { board, BoardError, type Board, type MessageView } from '@vercel/board'
 import { setupBoard } from '../src/host/grants.ts'
 import { createApp } from '../src/server/app.ts'
 import { guardReason } from '../src/server/guard.ts'
@@ -477,4 +477,23 @@ test('A root deleted between its lookup and its thread read answers 404', async 
   race.beforeThreadRead(async () => host.owner.delete((await host.posted(rid)).id))
   assert.equal((await host.call(`/api/ui/thread?rid=${rid}`)).status, 404)
   assert.ok(race.ran(), 'the delete landed between the reads')
+})
+
+test('A Board error on the UI post: duplicate_id answers 409 conflict with a JSON body; a 5xx answers 500 and writes nothing', async (t) => {
+  const failure: { id: string; error: BoardError } = { id: '', error: new BoardError('duplicate_id', 'stubbed collision', 409) }
+  /** The writer's board: the post with client ID `failure.id` fails with `failure.error`. */
+  const openBoard = (): Board => {
+    const handle = board()
+    const fail = (input: string | { id?: string }) => typeof input !== 'string' && input.id === failure.id
+    return { ...handle, post: (channel, input) => (fail(input) ? Promise.reject(failure.error) : handle.post(channel, input)) }
+  }
+  const host = await startHost(t, { openBoard })
+  const rid = uiRid()
+  failure.id = `app:${rid}`
+  const taken = await host.write({ rid, kind: 'todo', text: 'Another author holds this ID.' })
+  assert.deepEqual([taken.status, taken.json().refused], [409, 'conflict'])
+
+  failure.error = new BoardError('unavailable', 'stubbed outage', 503)
+  assert.equal((await host.write({ rid, kind: 'todo', text: 'Board is down.' })).status, 500)
+  assert.deepEqual(await host.messages('todos'), [])
 })
