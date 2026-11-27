@@ -39,8 +39,9 @@ Release 1 refuses `msg`, `queue`, `ack`, and reactions (`react`). The app writes
 
 ## Ingest
 
-The app's state writer reads `inbox` in log order from the app marker's `applied` label, every 15 s. For each intent it writes the canonical post, or sets `refused=<reason>` on the intent's `inbox` post and writes nothing. It validates each intent first, then looks for `app:<rid>`. When that post is this intent's canonical post, in the same channel, with the same parent root, text, and labels, the intent was already applied: a replay only folds that post's thread again and repeats no other check, such as the pending guard. A root's state labels and `env` are not compared, since they change after the root is written. Any other post with that ID refuses the intent as `rid`, and so does a deleted one, which keeps no text or labels to compare.
+The app's state writer reads `inbox` in log order from the app marker's `applied` label, every 15 s. For each intent it writes the canonical post, or sets `refused=<reason>` on the intent's `inbox` post and writes nothing. It validates each intent first, then looks for `app:<rid>`. When that post is this intent's canonical post, in the same channel, with the same parent root and labels, `digest` among them, the intent was already applied: a replay only folds that post's thread again and repeats no other check, such as the pending guard. A root's state labels and `env` are not compared, since they change after the root is written. Any other post with that ID refuses the intent as `rid`, and so do a deleted one, which keeps no labels to compare, and one without `digest`.
 
+- Every canonical post, an intent's or a UI write's, carries `digest`: the SHA-256, in hex, of the exact text the app asked Board to write. Board rewrites a known `@handle` in the text it stores, so a replay compares `digest`, not the stored text. Only the app's canonical write sets it; no intent or UI write carries labels.
 - A new root carries `rid`, `by`, and the routing labels `repo`, `machine`, `env`, and `thread`, set once; a work item also carries `issue`. The app sets `env` from the host's machine map (`devchat-host install --machine <name>=<T3 environment ID>`) and leaves it unset for a machine the map does not name.
 - A reply carries `rid`, `by`, `kind`, and the applicable `re`, `block=1`, or `pr.<n>`, where `<n>` is the number at the end of the `pr` URL's `/pull/<n>` path.
 - After each post, the app folds the thread from its root and writes `status`, `ask`, `turn`, and `pr.<n>` on the root. A root deleted on the board keeps no labels, so its fold writes nothing.
@@ -52,7 +53,7 @@ The app's state writer reads `inbox` in log order from the app marker's `applied
 | `json` | The text is not JSON. |
 | `deferred` | `kind` is `msg`, `queue`, `ack`, or `react`, which arrive in release 2. |
 | `invalid` | The intent does not match the release 1 schema: for example `kind=answer`, `by=user`, a state field such as `status`, or text or a label value Board cannot store. Also an intent whose canonical post Board refuses with a 400. |
-| `rid` | The `rid` already names another post: a different channel, parent, kind, text, or label, or a deleted post. |
+| `rid` | The `rid` already names another post: a different channel, parent, kind, text, or label, or a deleted post. Also a new post whose `rid` starts with `ui-`, ignoring case: the UI route's namespace. An intent whose own canonical post already exists still replays. Also a canonical post whose client ID Board reports another author holds (`409 duplicate_id`). |
 | `repo` | `repo` is not `<owner>/<repo>` with its owner on the host allowlist (`devchat-host install --allowlist <owner,...>`). An empty allowlist refuses every `repo`. |
 | `root` | No todo, work, or message root has the `rid` that `root` names, or that root is deleted. |
 | `profile` | A reply in `msg` comes from a profile other than `coordinator`. |
@@ -64,6 +65,22 @@ The package root exports these reasons as `refusalReasons`.
 ```json
 {"v":1,"rid":"ask-1","kind":"ask","root":"work-1","text":"Can we proceed?","by":"agent","block":1}
 ```
+
+## UI route
+
+The web UI writes only through the app, under `/api/ui/` on the devchat origin. `tailscale serve` forwards the browser's `Host` unchanged, so the app answers a request only when it carries one `Host`, exactly `<host>:<https port>` (the bare `<host>` on port 443), and one `Tailscale-User-Login`, the configured login. A write is `POST /api/ui/posts` with `Sec-Fetch-Site: same-origin`, `Origin: https://` and that same authority, and a JSON body. The package root exports its schema as `userWriteSchema`. Every write carries `rid`, which the browser makes once per write: `ui-` and a lowercase UUID.
+
+| `kind` | Fields | The app writes |
+| --- | --- | --- |
+| `todo`, `work` | `text`; `repo` of the project channel in view as GitHub names it (`<owner>/<repo>`), or none in #global | A root in `todos` or `work` with `rid`, `by=user`, and `repo` |
+| `answer` | `root`, a work item's `rid`; `text`; `re`, the `turn` the UI showed while the root has `ask=open` | A reply with `kind=answer` and `re` |
+| `done` | `root`, a todo's or work item's `rid` | A reply with `kind=done` and the text `Resolved.` |
+
+The app sets `by=user`; the schema refuses `by`, labels, and state fields. It runs its copy of the text guard on every string the body writes, `repo` included, and refuses every write while the guard is missing. It makes the write between ingest passes, never during one, and folds the thread before it answers `201` with `{rid, state}`, the root's state labels.
+
+A retry resends the same body with the same `rid`. When `app:<rid>` already is that post (by `by=user`, kind, channel, parent root, `re`, `repo`, and the `digest` of its text), the app writes nothing, folds the thread again, and answers `200` with the same `{rid, state}`. So a retry after a lost answer, or after a write that stopped before its fold, posts once. The same `rid` with another body, or a `rid` whose client ID Board reports another author holds, answers `409` with `refused: conflict`. Other refusals: `422` `guard`; `400` `repo` (not allowlisted), `re` (not a question in that thread), or `invalid` (Board refused the post); `404` `root` (no such root for this kind); `503` while the guard is missing.
+
+The reads `GET /api/ui/needs-you`, `channels`, `threads?channel=todos|work[&repo=<owner>/<repo>][&resolved=1][&before=<older>]`, and `thread?rid=<root rid>` answer from `todos` and `work` only. Needs you lists `ask=open` or `status=blocked` first, then `ask=answered`; a thread with `ask=answered` shows only in the second list. A root with no `status` yet counts as open. Page the open list by passing `older` back as `before` until it is null.
 
 ## Shared fixtures
 

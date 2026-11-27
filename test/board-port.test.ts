@@ -22,6 +22,6 @@ test('the board port preserves client IDs, cursors, and conditional label writes
     code: 'label_conflict',
   })
   await port.setLabels(root.id, { set: { status: 'done' }, if: { status: 'open' } })
-  const { threads } = await port.threadsByLabel({ channel: 'work', label: { status: 'done' } })
+  const { threads } = await port.threads({ channel: 'work', label: { status: 'done' } })
   assert.deepEqual(threads.map(({ message }) => message.id), [root.id])
 })

@@ -13,6 +13,7 @@ import { foldState, isStateLabel } from '../src/server/fold.ts'
 import { createStateWriter } from '../src/server/writer.ts'
 import { appMarker, boardMarker, type Intent } from '../src/shared/layout.ts'
 import { startBoardServer } from '../src/testing/index.ts'
+import { sha256, withoutDigest } from './digest.ts'
 import { foldFixture } from './fold-fixture.ts'
 
 type Labels = Record<string, string>
@@ -48,15 +49,16 @@ async function startHost(t: TestContext, { machines = {} }: { machines?: Labels 
     assert.equal(response.status, 201, response.body)
     return (JSON.parse(response.body) as { message: { id: string } }).message.id
   }
+  /** The app's canonical post for `rid` without its `digest`, or null. */
   const canonical = async (rid: string) => {
     try {
-      return await owner.posted(`app:${rid}`)
+      return withoutDigest(await owner.posted(`app:${rid}`))
     } catch (error) {
       if (error instanceof BoardError && error.code === 'post_not_found') return null
       throw error
     }
   }
-  const rootLabels = async (rid: string) => (await owner.posted(`app:${rid}`)).labels
+  const rootLabels = async (rid: string) => withoutDigest(await owner.posted(`app:${rid}`)).labels
   const userReply = async (root: string, labels: Labels, text = 'From the user.') => {
     const target = await owner.posted(`app:${root}`)
     await owner.reply(target.id, { id: `app:${labels.rid}`, text, labels: { by: 'user', kind: 'answer', ...labels } })
@@ -131,6 +133,8 @@ for (const { name, channel, steps } of foldFixture) {
       // Every post is stored as the fixture has it, also one the pending guard keeps from changing the root.
       const stored = (await host.canonical(post.labels.rid ?? ''))?.labels ?? {}
       assert.deepEqual(index === 0 ? Object.fromEntries(Object.entries(stored).filter(([key]) => !isStateLabel(key))) : stored, post.labels)
+      // The app's own posts carry the digest of the text it wrote; `userReply` stands in for the UI route.
+      if (post.labels.by !== 'user') assert.equal((await host.owner.posted(`app:${post.labels.rid}`)).labels.digest, sha256(post.text))
     }
     assert.deepEqual((await host.messages('inbox')).filter(({ labels }) => labels.refused), [])
   })
@@ -267,6 +271,34 @@ test('Ingest: a resolve applied before a crash, with a user reply written before
     { rid: 'work-1', by: base.by, repo: 'example/project', status: 'open', ask: 'answered', turn: 'answer-2' })
 })
 
+test('Ingest: an intent whose text has an @handle replays after a crash, though Board stored the mention resolved; another text with its rid is refused', async (t) => {
+  const host = await startHost(t)
+  // The tailnet login's first post makes it a Board actor with the handle `user`, after Board read
+  // that post's text: the intent keeps `@user`, and the canonical post stores the resolved mention.
+  const text = 'Review with @user.'
+  const todo = await host.submit({ ...base, rid: 'todo-1', kind: 'todo', channel: 'todos', text })
+  await assert.rejects(host.writer(({ method, id }) => method === 'post' && id === 'app:todo-1').pass(), /crash/)
+  const stored = await host.owner.posted('app:todo-1')
+  assert.notEqual(stored.text, text, 'Board resolved the mention')
+  assert.equal(stored.labels.digest, sha256(text))
+
+  const other = await host.submit({ ...base, rid: 'todo-1', kind: 'todo', channel: 'todos', text: 'Review with @user later.' }, 'todo-1-again')
+  await host.writer().pass()
+  const inbox = await host.messages('inbox')
+  assert.deepEqual([todo, other].map((id) => inbox.find((message) => message.id === id)?.labels.refused ?? null), [null, 'rid'])
+  assert.equal(await host.applied(), other)
+  assert.equal((await host.rootLabels('todo-1')).status, 'open')
+  assert.equal((await host.messages('todos')).length, 1)
+})
+
+test('Ingest: no intent sets the digest label', async (t) => {
+  const host = await startHost(t)
+  const forged = await host.submit({ ...work('work-1'), digest: sha256('Another text.') })
+  await host.writer().pass()
+  assert.equal((await host.messages('inbox')).find(({ id }) => id === forged)?.labels.refused, 'invalid')
+  assert.equal(await host.canonical('work-1'), null)
+})
+
 test('Ingest: a replay folds the thread of an intent already written before applied passes it', async (t) => {
   const host = await startHost(t)
   await host.submit(work('work-1'))
@@ -280,7 +312,7 @@ test('Ingest: a replay folds the thread of an intent already written before appl
   assert.equal((await host.rootLabels('work-1')).status, 'blocked')
 })
 
-test('Ingest: a 400 from Board on a canonical post refuses that intent and moves on; a 5xx stops the pass and retries it', async (t) => {
+test('Ingest: a 400 from Board on a canonical post refuses that intent as invalid, and a 409 duplicate_id as rid, and moves on; a 5xx stops the pass and retries it', async (t) => {
   const host = await startHost(t)
   await host.submit(work('work-1'))
   await host.writer().pass()
@@ -294,6 +326,16 @@ test('Ingest: a 400 from Board on a canonical post refuses that intent and moves
   assert.equal(await host.canonical('note-1'), null)
   assert.ok(await host.canonical('note-2'))
   assert.equal(await host.applied(), inbox.at(-1)?.id)
+
+  // A client ID another author holds: the app's lookup finds nothing, and Board answers 409.
+  const duplicate = new BoardError('duplicate_id', 'stubbed collision', 409)
+  const takenRoot = await host.submit(work('work-taken'))
+  const takenReply = await host.submit({ ...base, rid: 'note-taken', kind: 'note', root: 'work-1', text: 'Taken.' })
+  await createStateWriter({ settings: { allowlist: ['example'], machines: {} }, stateFile: host.stateFile,
+    openBoard: () => failing(failing(board(), 'app:work-taken', duplicate), 'app:note-taken', duplicate) }).pass()
+  const taken = await host.messages('inbox')
+  assert.deepEqual([takenRoot, takenReply].map((id) => taken.find((message) => message.id === id)?.labels.refused), ['rid', 'rid'])
+  assert.equal(await host.applied(), takenReply)
 
   const retried = await host.submit({ ...base, rid: 'note-3', kind: 'note', root: 'work-1', text: 'Board is down.' })
   const before = await host.applied()
