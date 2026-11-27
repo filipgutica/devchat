@@ -55,10 +55,13 @@ test('install checks every destination before its first write, and stages only i
 
 test('safe_path refuses a symlink and a world-writable directory on the path', (t) => {
   // A sandbox that maps root to another user shows system files as someone else's.
-  if (bash('stat -c %U /usr/bin').stdout.trim() !== 'root') return t.skip('/usr/bin is not root-owned here')
+  if (bash('stat -c %U /etc/systemd/system').stdout.trim() !== 'root') return t.skip('system files are not root-owned here')
   const safePath = (path: string) => bash(renderScript([{ title: 'path', bash: `safe_path ${path}` }]))
-  assert.equal(safePath('/usr/bin/env').status, 0)
-  assert.equal(safePath('/usr/bin/devchat-missing/x').status, 0)
+  // install checks this directory on every host it runs on.
+  for (const path of ['/etc/systemd/system', '/etc/systemd/system/devchat-missing/x']) {
+    const result = safePath(path)
+    assert.equal(result.status, 0, `${path}: ${result.stderr}`)
+  }
   const tmp = safePath('/tmp/devchat-x')
   assert.equal(tmp.status, 1)
   assert.match(tmp.stderr, /\/tmp is group- or world-writable/)

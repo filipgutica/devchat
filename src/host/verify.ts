@@ -196,7 +196,13 @@ async function checkNotWritable(check: Check) {
     const stat = await lstat(path)
     if (!stat.isFile() && !stat.isDirectory()) problems.push(`${path} is not a regular file or directory`)
     if (stat.uid !== 0 || (stat.mode & 0o022) !== 0) problems.push(`${path} is not root-owned or is group- or world-writable`)
-    if (stat.isDirectory()) for (const name of await readdir(path)) await walk(join(path, name))
+    if (!stat.isDirectory()) return
+    // A directory this account cannot list, such as install's staging directory (711), it cannot change below.
+    const names = await readdir(path).catch((error: unknown) => {
+      if (errorCodeOf(error) === 'EACCES') return []
+      throw error
+    })
+    for (const name of names) await walk(join(path, name))
   }
   problems.push(...await pathProblems(hostPaths.optDir, true))
   await walk(hostPaths.optDir)
