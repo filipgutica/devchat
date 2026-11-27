@@ -167,7 +167,7 @@ export function ThreadPane({ rid, thread, repos, offline, onClose, onSaved }: Th
         )}
       </div>
       {thread?.root.channel === 'work' && (
-        <Composer {...composerWording(thread)} offline={offline} onSaved={() => onSaved('Saved to the board')}
+        <Composer storeKey={`thread:${rid}`} {...composerWording(thread)} offline={offline} onSaved={() => onSaved('Saved to the board')}
           toDraft={(text, re) => ({ kind: 'answer', root: rid, text, ...(re ? { re } : {}) })} />
       )}
     </aside>

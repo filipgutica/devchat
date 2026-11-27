@@ -253,7 +253,7 @@ test('Each tab keeps its own unconfirmed write: a work item sent meanwhile takes
   await composer(page, 'New work item in #global').fill('Work text.')
   await composer(page, 'New work item in #global').press('Enter')
   await expect(rows(page, 'Open work items in #global')).toHaveCount(1)
-  await expect(page.locator('.field-error').filter({ visible: true })).toHaveCount(0)
+  await expect(page.locator('.field-error')).toHaveCount(0)
 
   await page.getByRole('tab', { name: 'Todos' }).click()
   await expect(composer(page, 'New todo in #global')).toHaveValue('Todo text.')
@@ -265,6 +265,52 @@ test('Each tab keeps its own unconfirmed write: a work item sent meanwhile takes
   expect(sent[1]!.rid).not.toBe(sent[0]!.rid)
   expect((await posts(host, 'todos')).map((post) => post.text)).toEqual(['Todo text.'])
   expect((await posts(host, 'work')).map((post) => post.text)).toEqual(['Work text.'])
+})
+
+test('Leaving a channel keeps its unconfirmed write: back there, Retry resends the same rid', async ({ page, host }) => {
+  await open(page, host, '#/global')
+  host.dropNextWriteResponse()
+  await composer(page, 'New todo in #global').fill('Keep me.')
+  await composer(page, 'New todo in #global').press('Enter')
+  await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible()
+
+  const nav = page.getByRole('navigation', { name: 'Views' })
+  await nav.getByRole('link', { name: /Needs you/ }).click()
+  await expect(page.getByRole('heading', { name: 'Needs you', level: 1 })).toBeVisible()
+  await page.getByRole('navigation', { name: 'Channels' }).getByRole('link', { name: '#global' }).click()
+  await expect(composer(page, 'New todo in #global')).toHaveValue('Keep me.')
+  await page.getByRole('button', { name: 'Retry' }).click()
+  await expect(rows(page, 'Open todos in #global')).toHaveCount(1)
+  expect(host.writes).toHaveLength(2)
+  expect(host.writes[1]).toBe(host.writes[0])
+})
+
+test('Closing a thread keeps its unconfirmed answer: reopened, Retry resends it, and an edited draft keeps its question', async ({ page, host }) => {
+  await host.submit({ ...agent, rid: 'work-1', kind: 'work', channel: 'work', text: 'Ship the exporter.', repo: 'example/one' })
+  await host.submit({ ...agent, rid: 'ask-1', root: 'work-1', kind: 'ask', text: 'Which port?' })
+  await host.pass()
+  await open(page, host)
+  await page.getByRole('link', { name: 'Ship the exporter.' }).click()
+  const pane = page.getByRole('complementary', { name: /Thread/ })
+  const field = pane.getByRole('textbox')
+  host.dropNextWriteResponse()
+  await field.fill('Use 8443.')
+  await field.press('Enter')
+  await expect(pane.getByRole('button', { name: 'Retry' })).toBeVisible()
+
+  await pane.getByRole('button', { name: 'Close thread' }).click()
+  await expect(pane).toHaveCount(0)
+  await page.getByRole('link', { name: 'Ship the exporter.' }).click()
+  await expect(field).toHaveValue('Use 8443.')
+  // The draft changes before the retry: it stays, bound to the question it was written for.
+  await field.fill('Use 8443, or 9443.')
+  await pane.getByRole('button', { name: 'Retry' }).click()
+  await expect(pane.getByText('The question you were answering is no longer open. Your reply is kept.')).toBeVisible()
+  await expect(field).toHaveValue('Use 8443, or 9443.')
+  await field.press('Enter')
+  expect(host.writes).toHaveLength(2)
+  expect(host.writes[1]).toBe(host.writes[0])
+  expect((await posts(host, 'work')).filter((post) => post.labels.kind === 'answer').map((post) => post.text)).toEqual(['Use 8443.'])
 })
 
 test('Send stays locked until the confirmed draft is cleared, even while the read after it is held', async ({ page, host }) => {
@@ -419,7 +465,7 @@ test('The page polls every 15 s; offline it says so, keeps what it shows, and di
   await expect(rows(page, 'Open todos in #global')).toHaveCount(2)
   await expect(composer(page, 'New todo in #global')).toBeDisabled()
   await expect(composer(page, 'New todo in #global')).toHaveValue('Draft while offline.')
-  await expect(page.getByText("Offline: devchat can't be reached. Sending comes back when it can.").filter({ visible: true })).toBeVisible()
+  await expect(page.getByText("Offline: devchat can't be reached. Sending comes back when it can.")).toBeVisible()
 
   host.setReachable(true)
   await page.clock.runFor(15_000)

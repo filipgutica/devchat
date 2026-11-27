@@ -64,6 +64,7 @@ export function ChannelView({ view, threads, offline, onSaved, ...shared }: Chan
   const { navigate, route, repos } = shared
   const name = channelName(view.repo, repos)
   const body = useRef<HTMLDivElement>(null)
+  const storeKey = `channel:${view.repo ?? ''}:${view.tab}`
   const setView = (change: Partial<typeof view>) => navigate({ view: { ...view, ...change }, thread: route.thread })
 
   // A conversation reads from the bottom: show the newest items, next to the composer.
@@ -95,13 +96,10 @@ export function ChannelView({ view, threads, offline, onSaved, ...shared }: Chan
         <TabsPanel value="work">{list('work')}</TabsPanel>
       </div>
       <div className="view-foot">
-        {/* One composer per tab, both kept mounted: each holds its own draft and unconfirmed write. */}
-        {(['todos', 'work'] as const).map((tab) => (
-          <div key={`${name}:${tab}`} hidden={tab !== view.tab}>
-            <Composer label={`New ${tab === 'todos' ? 'todo' : 'work item'} in ${name}`} offline={offline} onSaved={() => onSaved('Saved to the board')}
-              toDraft={(text) => ({ kind: tab === 'todos' ? 'todo' : 'work', text, ...(view.repo ? { repo: view.repo } : {}) })} />
-          </div>
-        ))}
+        {/* Each repo and tab keeps its own draft and unconfirmed write. */}
+        <Composer key={storeKey} storeKey={storeKey} label={`New ${view.tab === 'todos' ? 'todo' : 'work item'} in ${name}`} offline={offline}
+          onSaved={() => onSaved('Saved to the board')}
+          toDraft={(text) => ({ kind: view.tab === 'todos' ? 'todo' : 'work', text, ...(view.repo ? { repo: view.repo } : {}) })} />
       </div>
     </Tabs>
   )

@@ -1,13 +1,16 @@
 import { Button } from '@ui-sdk/react/button'
-import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useId, useRef, useState, type KeyboardEvent } from 'react'
 import type { UserWrite } from '../../src/shared/layout.ts'
 import { newRid, sendWrite, type Draft } from './api.ts'
+import { readComposer, updateComposer, useComposerState, type ComposerState, type PendingWrite } from './composer-store.ts'
 import { Icon } from './icons.tsx'
 
 /** The question a reply answers now: the post `turn` names while `ask=open`. */
 export type Question = { rid: string; text: string }
 
 type ComposerProps = {
+  /** Where this composer's draft and write live: a channel tab or a thread, stable across visits. */
+  storeKey: string
   /** Names the field for where the text goes, such as "New todo in #global". */
   label: string
   /** What the reader should know before sending, such as "Waiting for the agent."; none by default. */
@@ -21,44 +24,24 @@ type ComposerProps = {
   onSaved: () => Promise<void>
 }
 
-/**
- * A write this composer sent whose outcome it has not learned yet. It is immutable: a retry resends
- * exactly this rid and body (D4), and a changed draft never takes its rid.
- */
-type PendingWrite = Readonly<{ text: string; body: Readonly<UserWrite> }>
-
-type Status =
-  | { status: 'idle' }
-  | { status: 'busy' }
-  /** `retry` is set while the outcome is unknown: the pending write can only be resent or discarded. */
-  | { status: 'error'; message: string; retry: boolean }
-
 const offlineHint = "Offline: devchat can't be reached. Sending comes back when it can."
 const blockedByPending = 'Not sent: the earlier text may already be on the board. Retry it, or discard it to send this text.'
 
 /**
  * One auto-growing field with an inline send button and a hint (components.md, Composer). Enter
  * sends and Shift+Enter starts a new line. It owns its writes under the D4 contract: each send makes
- * one immutable pending write, which stays until the board answers for it; Send stays locked from the
- * click until the confirmed draft is cleared; and a reply bound to one question is never sent as the
- * answer to another without the user's say-so.
+ * one immutable pending write, which stays until the board answers for it or the user discards it,
+ * even if the composer closes meanwhile; Send stays locked from the click until the confirmed draft
+ * is cleared; and a reply bound to one question is never sent as the answer to another without the
+ * user's say-so.
  */
-export function Composer({ label, hint, offline, toDraft, question, onSaved }: ComposerProps) {
+export function Composer({ storeKey, label, hint, offline, toDraft, question, onSaved }: ComposerProps) {
   const id = useId()
-  const [text, setText] = useState('')
-  /** The question the draft started under: a reply answers what the user saw while writing it. */
-  const [bound, setBound] = useState<{ rid: string | undefined } | null>(null)
-  const [status, setStatus] = useState<Status>({ status: 'idle' })
+  const { text, bound, status } = useComposerState(storeKey)
   /** Set after the board confirms this composer's write, and cleared once the user types again (§12). */
   const [saved, setSaved] = useState(false)
-  const pending = useRef<PendingWrite | null>(null)
-  /** Held from a send's click until the render that follows its answer, so one draft sends once. */
-  const locked = useRef(false)
   const field = useRef<HTMLTextAreaElement>(null)
-
-  useLayoutEffect(() => {
-    if (status.status !== 'busy') locked.current = false
-  }, [status])
+  const update = (change: (state: ComposerState) => Partial<ComposerState>) => updateComposer(storeKey, change)
 
   const busy = status.status === 'busy'
   const error = status.status === 'error' ? status : null
@@ -69,45 +52,50 @@ export function Composer({ label, hint, offline, toDraft, question, onSaved }: C
   const shownHint = offline ? offlineHint : [saved && 'Saved to the board.', hint].filter(Boolean).join(' ')
 
   async function attempt(write: PendingWrite) {
-    locked.current = true
-    setStatus({ status: 'busy' })
+    update(() => ({ status: { status: 'busy' } }))
     const outcome = await sendWrite(write.body)
-    if (outcome.ok || outcome.written === false) pending.current = null
     if (!outcome.ok) {
-      setStatus({ status: 'error', message: outcome.message, retry: outcome.written === 'unknown' })
+      update(() => ({
+        status: { status: 'error', message: outcome.message, retry: outcome.written === 'unknown' },
+        ...(outcome.written === false ? { pending: null } : {}),
+      }))
       return
     }
-    // Clear the confirmed draft in the same render that ends the busy state, so Send can't resend it.
-    setText((current) => (current === write.text ? '' : current))
-    setBound(null)
+    // One change clears the confirmed draft and ends the busy state, so Send can't resend it. A draft
+    // edited since keeps its text and the question it is bound to.
+    update((current) => ({
+      pending: null,
+      status: { status: 'idle' },
+      ...(current.text === write.text ? { text: '', bound: null } : {}),
+    }))
     setSaved(true)
-    setStatus({ status: 'idle' })
     field.current?.focus()
     void onSaved()
   }
 
   function send() {
-    if (locked.current || offline || !hasDraft) return
-    const earlier = pending.current
+    const current = readComposer(storeKey)
+    if (current.status.status === 'busy' || offline || !hasDraft) return
+    const earlier = current.pending
     // Enter on the unchanged text of an unconfirmed write is its retry.
     if (earlier) {
       if (earlier.text === text) return void attempt(earlier)
-      return setStatus({ status: 'error', message: blockedByPending, retry: true })
+      return update(() => ({ status: { status: 'error', message: blockedByPending, retry: true } }))
     }
     if (moved) return
     const re = bound ? bound.rid : question?.rid
     const write: PendingWrite = Object.freeze({ text, body: Object.freeze({ ...toDraft(text, re), rid: newRid() } as UserWrite) })
-    pending.current = write
+    update(() => ({ pending: write }))
     void attempt(write)
   }
 
   function retry() {
-    if (pending.current && !locked.current) void attempt(pending.current)
+    const { pending, status: now } = readComposer(storeKey)
+    if (pending && now.status !== 'busy') void attempt(pending)
   }
 
   function discard() {
-    pending.current = null
-    setStatus({ status: 'idle' })
+    update(() => ({ pending: null, status: { status: 'idle' } }))
     field.current?.focus()
   }
 
@@ -134,11 +122,12 @@ export function Composer({ label, hint, offline, toDraft, question, onSaved }: C
           aria-errormessage={error ? `${id}-error` : undefined}
           onChange={(event) => {
             const next = event.target.value
-            setText(next)
             setSaved(false)
             // A new draft binds to the question in view; an emptied one lets go.
-            if (next.trim() === '') setBound(null)
-            else if (!bound) setBound({ rid: question?.rid })
+            update((current) => ({
+              text: next,
+              bound: next.trim() === '' ? null : current.bound ?? { rid: question?.rid },
+            }))
           }}
           onKeyDown={onKeyDown}
         />
@@ -149,7 +138,7 @@ export function Composer({ label, hint, offline, toDraft, question, onSaved }: C
       {moved && (
         <div className="composer-note" id={`${id}-moved`}>
           <p>{question ? `A new question arrived: “${question.text}” Your reply is kept.` : 'The question you were answering is no longer open. Your reply is kept.'}</p>
-          <Button data-variant="text" data-size="sm" onClick={() => setBound({ rid: question?.rid })}>
+          <Button data-variant="text" data-size="sm" onClick={() => update(() => ({ bound: { rid: question?.rid } }))}>
             {question ? 'Answer this question' : 'Send as a reply'}
           </Button>
         </div>
