@@ -2,7 +2,7 @@ import { board, BoardError, type Board, type MessageView } from '@vercel/board'
 import { readFile, rename, writeFile } from 'node:fs/promises'
 import { z } from 'zod'
 import {
-  appMarker, boardMarker, channels, deferredIntentKinds, intentSchema, rid, type Intent, type RefusalReason,
+  appMarker, boardMarker, channels, deferredIntentKinds, intentSchema, type Intent, type RefusalReason,
 } from '../shared/layout.ts'
 import type { Settings } from '../host/settings.ts'
 import { createBoardPort, type BoardPort } from './board-port.ts'
@@ -74,7 +74,29 @@ const isAllowlisted = (repo: string, allowlist: readonly string[]) => {
 }
 
 /** The PR number of a pull request URL, for its `pr.<n>` label, or null. */
-const prNumber = (url: string) => (url.length > 256 ? null : /\/pull\/(\d{1,9})\/?$/.exec(new URL(url).pathname)?.[1] ?? null)
+const prNumber = (url: string) => /\/pull\/(\d{1,9})\/?$/.exec(new URL(url).pathname)?.[1] ?? null
+
+/**
+ * A canonical write, or null when Board answers 400: it refused that post as given and wrote
+ * nothing, so the intent is refused and the queue moves on. Any other error ends the pass, and the
+ * next pass retries the same intent.
+ */
+async function writeCanonical(write: () => Promise<MessageView>) {
+  try {
+    return await write()
+  } catch (error) {
+    if (error instanceof BoardError && error.status === 400) {
+      console.error(`devchat: board refused a canonical post (${error.code}): ${error.message}`)
+      return null
+    }
+    throw error
+  }
+}
+
+/** Whether `post` is what the normal write path writes for `intent`: a reused rid that names another post is not. */
+const isCanonicalFor = (intent: Intent, post: MessageView) => ('root' in intent
+  ? post.re !== null && post.labels.kind === intent.kind && conversationChannels.includes(post.channel)
+  : post.re === null && post.channel === intent.channel)
 
 const definedLabels = (labels: Record<string, string | undefined>) =>
   Object.fromEntries(Object.entries(labels).filter((entry): entry is [string, string] => entry[1] !== undefined))
@@ -113,7 +135,8 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
       thread: intent.thread,
       issue: intent.kind === 'work' ? intent.issue : undefined,
     })
-    const root = await port.post(intent.channel, { id: `app:${intent.rid}`, text: intent.text, labels })
+    const root = await writeCanonical(() => port.post(intent.channel, { id: `app:${intent.rid}`, text: intent.text, labels }))
+    if (!root) return 'invalid'
     await foldThread(port, root.id)
     return null
   }
@@ -136,7 +159,7 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
       if (state.ask === 'answered' && intent.re !== state.turn) return 'pending'
       text = intent.kind === 'done' ? 'Resolved.' : 'Dropped.'
     }
-    await port.reply(target.id, { id: `app:${intent.rid}`, text, labels })
+    if (!await writeCanonical(() => port.reply(target.id, { id: `app:${intent.rid}`, text, labels }))) return 'invalid'
     await foldThread(port, target.id)
     return null
   }
@@ -150,19 +173,21 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
     } catch {
       return 'json'
     }
+    const kind = z.object({ kind: z.enum(deferredIntentKinds) }).safeParse(json)
+    if (kind.success) return 'deferred'
+    const parsed = intentSchema.safeParse(json)
+    if (!parsed.success) return 'invalid'
+    const intent = parsed.data
     // The decision already made: a canonical post means the intent was applied, whatever was written
-    // since, so a replay folds that post's thread and validates nothing (§12, Recovery).
-    const named = z.object({ rid }).safeParse(json)
-    const written = named.success ? await findOwn(port, `app:${named.data.rid}`) : null
+    // since, so a replay folds that post's thread and checks nothing else (§12, Recovery). No intent
+    // Board accepted fails the schema, so checking it first refuses nothing that was applied.
+    const written = await findOwn(port, `app:${intent.rid}`)
     if (written) {
+      if (!isCanonicalFor(intent, written)) return 'rid'
       await foldThread(port, written.re ?? written.id)
       return null
     }
-    const kind = z.object({ kind: z.enum(deferredIntentKinds) }).safeParse(json)
-    if (kind.success) return 'deferred'
-    const intent = intentSchema.safeParse(json)
-    if (!intent.success) return 'invalid'
-    return 'root' in intent.data ? writeReply(port, intent.data) : writeRoot(port, intent.data)
+    return 'root' in intent ? writeReply(port, intent) : writeRoot(port, intent)
   }
 
   /** Decides every `inbox` post after `after`, a page at a time, and moves `applied` past each page. */

@@ -31,7 +31,7 @@ A new root has `channel`. A reply has `root`, the target root's `rid`.
 | `ask` | `root` | `re`, `block: 1` |
 | `done`, `drop` | `root` | `re`. Use an empty string for `text`; the app writes the canonical reply with the fixed text `Resolved.` or `Dropped.`, because Board refuses a post with no text. |
 
-A `rid` uses letters, digits, and `.`, `_`, `:`, `-`, at most 196 characters (Board reads `|` in a label query as OR). Every field the app copies into a label (`by`, `repo`, `machine`, `thread`, `issue`) is 1 to 256 characters, Board's label-value limit.
+A `rid` uses letters, digits, and `.`, `_`, `:`, `-`, at most 196 characters (Board reads `|` in a label query as OR). Every field the app copies into a label (`by`, `repo`, `machine`, `thread`, `issue`, `pr`) is 1 to 256 characters with no control characters and no lone surrogates, Board's label-value rule. `text` is at most 10,000 characters, not blank, with no NUL and no lone surrogates, Board's message-text rule.
 
 `re` names the post that the reply handles. For a new root, the router supplies any applicable provenance fields. The app derives `env` from `machine`. The schema refuses `env`, the reserved user profile, state fields such as `status`, and other fields outside the table. The app checks the target, the repo allowlist, and the pending-reply rule during ingest.
 
@@ -51,11 +51,12 @@ The app's state writer reads `inbox` in log order from the app marker's `applied
 | `reply` | The post is a reply; an intent is a root. |
 | `json` | The text is not JSON. |
 | `deferred` | `kind` is `msg`, `queue`, `ack`, or `react`, which arrive in release 2. |
-| `invalid` | The intent does not match the release 1 schema: for example `kind=answer`, `by=user`, or a state field such as `status`. |
+| `invalid` | The intent does not match the release 1 schema: for example `kind=answer`, `by=user`, a state field such as `status`, or text or a label value Board cannot store. Also an intent whose canonical post Board refuses with a 400. |
+| `rid` | The `rid` already names an app post of another kind or channel. |
 | `repo` | `repo` is not `<owner>/<repo>` with its owner on the host allowlist (`devchat-host install --allowlist <owner,...>`). An empty allowlist refuses every `repo`. |
 | `root` | No todo, work, or message root has the `rid` that `root` names. |
 | `profile` | A reply in `msg` comes from a profile other than `coordinator`. |
-| `pr` | The `pr` URL is longer than 256 characters, or does not end in `/pull/<n>`. |
+| `pr` | The `pr` URL does not end in `/pull/<n>`. |
 | `pending` | A resolve while a user reply is pending, without `re` naming it (`turn`). |
 
 The package root exports these reasons as `refusalReasons`.

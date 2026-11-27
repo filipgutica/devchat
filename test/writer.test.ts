@@ -71,6 +71,16 @@ async function startHost(t: TestContext, { machines = {} }: { machines?: Labels 
   return { server, owner, stateFile, writer, submit, canonical, rootLabels, userReply, messages, applied }
 }
 
+/** Board whose canonical post or reply with client ID `id` fails with `error` before it is written. */
+function failing(handle: Board, id: string, error: BoardError): Board {
+  const fail = (input: string | { id?: string }) => typeof input !== 'string' && input.id === id
+  return {
+    ...handle,
+    post: (channel, input) => (fail(input) ? Promise.reject(error) : handle.post(channel, input)),
+    reply: (target, input) => (fail(input) ? Promise.reject(error) : handle.reply(target, input)),
+  }
+}
+
 /** Board with every `post`, `reply`, and `label` counted; `crash` true after a write throws, as a process dying right after it. */
 function crashing(handle: Board, crash: (call: WriteCall) => boolean): Board {
   const after = async <T>(call: WriteCall, write: Promise<T>) => {
@@ -151,6 +161,9 @@ test('Ingest: kind=answer, by=user, a state field, a non-allowlisted repo, a mis
     ['pr', { ...base, rid: 'r-pr', kind: 'note', root: 'work-1', text: 'PR.', pr: 'https://example.com/issues/3' }],
     ['profile', { ...base, rid: 'r-profile', kind: 'note', root: 'msg-1', text: 'Picked up.' }],
     ['json', 'not json'],
+    ['invalid', `{"v":1,"rid":"r-nul","kind":"todo","channel":"todos","text":"a\\u0000b","by":"laptop-claude"}`],
+    ['invalid', `{"v":1,"rid":"r-surrogate","kind":"todo","channel":"todos","text":"a\\ud800b","by":"laptop-claude"}`],
+    ['invalid', { ...base, rid: 'r-pr-newline', kind: 'note', root: 'work-1', text: 'PR.', pr: 'https://example.com/pu\nll/1' }],
   ]
   const ids = new Map<string, string>()
   for (const [index, [, intent]] of refusals.entries()) ids.set(String(index), await host.submit(intent, `refused-${index}`))
@@ -265,6 +278,52 @@ test('Ingest: a replay folds the thread of an intent already written before appl
   await assert.rejects(host.writer(({ method, id }) => method === 'label' && id === marker).pass(), /crash/)
   await assertAppliedCoversOnlyFolded(host)
   assert.equal((await host.rootLabels('work-1')).status, 'blocked')
+})
+
+test('Ingest: a 400 from Board on a canonical post refuses that intent and moves on; a 5xx stops the pass and retries it', async (t) => {
+  const host = await startHost(t)
+  await host.submit(work('work-1'))
+  await host.writer().pass()
+  const refused = await host.submit({ ...base, rid: 'note-1', kind: 'note', root: 'work-1', text: 'Refused by Board.' })
+  await host.submit({ ...base, rid: 'note-2', kind: 'note', root: 'work-1', text: 'Applied.' })
+  const badRequest = new BoardError('invalid_request', 'stubbed refusal', 400)
+  await createStateWriter({ settings: { allowlist: ['example'], machines: {} }, stateFile: host.stateFile,
+    openBoard: () => failing(board(), 'app:note-1', badRequest) }).pass()
+  const inbox = await host.messages('inbox')
+  assert.equal(inbox.find(({ id }) => id === refused)?.labels.refused, 'invalid')
+  assert.equal(await host.canonical('note-1'), null)
+  assert.ok(await host.canonical('note-2'))
+  assert.equal(await host.applied(), inbox.at(-1)?.id)
+
+  const retried = await host.submit({ ...base, rid: 'note-3', kind: 'note', root: 'work-1', text: 'Board is down.' })
+  const before = await host.applied()
+  await assert.rejects(createStateWriter({ settings: { allowlist: ['example'], machines: {} }, stateFile: host.stateFile,
+    openBoard: () => failing(board(), 'app:note-3', new BoardError('unavailable', 'stubbed outage', 503)) }).pass(), /stubbed outage/)
+  assert.equal((await host.messages('inbox')).find(({ id }) => id === retried)?.labels.refused, undefined)
+  assert.equal(await host.applied(), before)
+  await host.writer().pass()
+  assert.ok(await host.canonical('note-3'))
+  assert.equal(await host.applied(), retried)
+})
+
+test('Ingest: a reused rid that names an app post of another kind or channel, such as a sched root, is refused and changes nothing', async (t) => {
+  const host = await startHost(t)
+  await host.submit(work('work-1'))
+  await host.writer().pass()
+  // A stopped schedule, as the UI route writes it from release 4.
+  const schedLabels = { rid: 'sched-1', by: 'user', status: 'stopped', every: 'P1D' }
+  await host.owner.post('sched', { id: 'app:sched-1', text: 'Every morning.', labels: schedLabels })
+  const asNote = await host.submit({ ...base, rid: 'sched-1', kind: 'note', root: 'work-1', text: 'Reuses the rid.' })
+  const asTodo = await host.submit({ ...base, rid: 'sched-1', kind: 'todo', channel: 'todos', text: 'Reuses it too.' }, 'sched-1-todo')
+  await host.writer().pass()
+
+  const inbox = await host.messages('inbox')
+  assert.equal(inbox.find(({ id }) => id === asNote)?.labels.refused, 'rid')
+  assert.equal(inbox.find(({ id }) => id === asTodo)?.labels.refused, 'rid')
+  const sched = await host.owner.posted('app:sched-1')
+  assert.deepEqual(sched.labels, schedLabels)
+  assert.equal((await host.owner.thread(sched.id)).replies.length, 0)
+  assert.equal((await host.owner.thread((await host.owner.posted('app:work-1')).id)).replies.length, 0)
 })
 
 /** The board as rids: each conversation post's labels and text, the reply counts, and inbox decisions. */

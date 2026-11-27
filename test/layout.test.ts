@@ -38,9 +38,20 @@ test('refuses derived fields, the user profile, and deferred kinds', () => {
     { by: 'agent\nlead' },
     { machine: 'box\u0007' },
     { thread: 'x\uD800' },
+    { text: 'a\u0000b' },
+    { text: 'a\uDC00b' },
+    { text: 'a'.repeat(10_001) },
     ...deferredIntentKinds.map((kind) => ({ kind })),
   ]) {
     assert.equal(intentSchema.safeParse({ ...work, ...override }).success, false, JSON.stringify(override))
+  }
+})
+
+test('refuses a pr URL that is not a storable label value', () => {
+  const note = { v: 1, rid: 'note-1', kind: 'note', root: 'work-1', text: 'Draft is ready.', by: 'agent' }
+  assert.equal(intentSchema.safeParse({ ...note, pr: 'https://example.com/pull/1' }).success, true)
+  for (const pr of ['https://example.com/pu\nll/1', `https://example.com/${'p'.repeat(240)}/pull/1`, 'not a url']) {
+    assert.equal(intentSchema.safeParse({ ...note, pr }).success, false, pr)
   }
 })
 
