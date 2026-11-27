@@ -35,6 +35,9 @@ test('refuses derived fields, the user profile, and deferred kinds', () => {
     { rid: 'x|y' },
     { by: 'a'.repeat(257) },
     { repo: 'r'.repeat(257) },
+    { by: 'agent\nlead' },
+    { machine: 'box\u0007' },
+    { thread: 'x\uD800' },
     ...deferredIntentKinds.map((kind) => ({ kind })),
   ]) {
     assert.equal(intentSchema.safeParse({ ...work, ...override }).success, false, JSON.stringify(override))
