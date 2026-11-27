@@ -115,3 +115,39 @@ test('The shell serves no symlink, nothing dot-named, and no file that moved out
   assert.equal(moved.status, 404)
   assert.notEqual(await moved.text(), 'secret')
 })
+
+test('At request time the shell serves a listed path only while it is still a regular file with no symlink or dot-named part', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'devchat-shell-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const build = join(dir, 'build')
+  await mkdir(join(build, 'assets'), { recursive: true })
+  await mkdir(join(build, '.hidden', 'assets'), { recursive: true })
+  for (const name of ['a.js', 'b.js', 'c.js']) await writeFile(join(build, 'assets', name), name)
+  await writeFile(join(build, 'index.html'), '<!doctype html>')
+  await writeFile(join(build, 'other.js'), 'another build file')
+  await writeFile(join(build, '.hidden', 'assets', 'index.html'), 'dot folder')
+
+  const app = createApp({ version: '0.0.0', shell: build })
+  app.listen(0, '127.0.0.1')
+  await once(app, 'listening')
+  t.after(() => app.close())
+  const url = `http://127.0.0.1:${(app.address() as AddressInfo).port}`
+  for (const name of ['a.js', 'b.js', 'c.js']) assert.equal((await fetch(`${url}/assets/${name}`)).status, 200, name)
+
+  // A symlink to another file inside the build, a directory, and a path through a dot-named folder.
+  await rm(join(build, 'assets', 'a.js'))
+  await symlink(join(build, 'other.js'), join(build, 'assets', 'a.js'))
+  await rm(join(build, 'assets', 'b.js'))
+  await mkdir(join(build, 'assets', 'b.js'))
+  await rm(join(build, 'index.html'))
+  await symlink(join(build, '.hidden', 'assets', 'index.html'), join(build, 'index.html'))
+  for (const path of ['/assets/a.js', '/assets/b.js', '/', '/index.html']) {
+    const answer = await fetch(`${url}${path}`)
+    assert.equal(answer.status, 404, path)
+  }
+  // A folder on the path swapped for a symlink to a dot-named folder.
+  await rm(join(build, 'assets'), { recursive: true })
+  await writeFile(join(build, '.hidden', 'assets', 'c.js'), 'dot folder')
+  await symlink(join(build, '.hidden', 'assets'), join(build, 'assets'))
+  assert.equal((await fetch(`${url}/assets/c.js`)).status, 404)
+})

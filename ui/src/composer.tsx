@@ -37,7 +37,7 @@ const blockedByPending = 'Not sent: the earlier text may already be on the board
  */
 export function Composer({ storeKey, label, hint, offline, toDraft, question, onSaved }: ComposerProps) {
   const id = useId()
-  const { text, bound, status } = useComposerState(storeKey)
+  const { text, bound, status, pending } = useComposerState(storeKey)
   /** Set after the board confirms this composer's write, and cleared once the user types again (§12). */
   const [saved, setSaved] = useState(false)
   const field = useRef<HTMLTextAreaElement>(null)
@@ -55,9 +55,11 @@ export function Composer({ storeKey, label, hint, offline, toDraft, question, on
     update(() => ({ status: { status: 'busy' } }))
     const outcome = await sendWrite(write.body)
     if (!outcome.ok) {
+      // Only an answer that proves this rid's fate drops the pending write; otherwise only Retry or
+      // Discard moves past it.
       update(() => ({
-        status: { status: 'error', message: outcome.message, retry: outcome.written === 'unknown' },
-        ...(outcome.written === false ? { pending: null } : {}),
+        status: { status: 'error', message: outcome.message, retry: !outcome.settled },
+        ...(outcome.settled ? { pending: null } : {}),
       }))
       return
     }
@@ -76,11 +78,10 @@ export function Composer({ storeKey, label, hint, offline, toDraft, question, on
   function send() {
     const current = readComposer(storeKey)
     if (current.status.status === 'busy' || offline || !hasDraft) return
-    const earlier = current.pending
-    // Enter on the unchanged text of an unconfirmed write is its retry.
-    if (earlier) {
-      if (earlier.text === text) return void attempt(earlier)
-      return update(() => ({ status: { status: 'error', message: blockedByPending, retry: true } }))
+    // Nothing new is sent past an unconfirmed write: the user retries or discards it first.
+    if (current.pending) {
+      if (current.pending.text !== text) update(() => ({ status: { status: 'error', message: blockedByPending, retry: true } }))
+      return
     }
     if (moved) return
     const re = bound ? bound.rid : question?.rid
@@ -138,9 +139,12 @@ export function Composer({ storeKey, label, hint, offline, toDraft, question, on
       {moved && (
         <div className="composer-note" id={`${id}-moved`}>
           <p>{question ? `A new question arrived: “${question.text}” Your reply is kept.` : 'The question you were answering is no longer open. Your reply is kept.'}</p>
-          <Button data-variant="text" data-size="sm" onClick={() => update(() => ({ bound: { rid: question?.rid } }))}>
-            {question ? 'Answer this question' : 'Send as a reply'}
-          </Button>
+          {/* An unconfirmed write keeps the draft on its question until it is retried or discarded. */}
+          {!pending && (
+            <Button data-variant="text" data-size="sm" onClick={() => update((current) => (current.pending ? {} : { bound: { rid: question?.rid } }))}>
+              {question ? 'Answer this question' : 'Send as a reply'}
+            </Button>
+          )}
         </div>
       )}
       {error && (

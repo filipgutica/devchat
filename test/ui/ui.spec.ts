@@ -313,6 +313,85 @@ test('Closing a thread keeps its unconfirmed answer: reopened, Retry resends it,
   expect((await posts(host, 'work')).filter((post) => post.labels.kind === 'answer').map((post) => post.text)).toEqual(['Use 8443.'])
 })
 
+test('After a failed answer, a new question offers only Retry or Discard; answering it takes a new write', async ({ page, host }) => {
+  await host.submit({ ...agent, rid: 'work-1', kind: 'work', channel: 'work', text: 'Ship the exporter.', repo: 'example/one' })
+  await host.submit({ ...agent, rid: 'ask-1', root: 'work-1', kind: 'ask', text: 'Which port?' })
+  await host.pass()
+  await page.clock.install()
+  await open(page, host, '#/needs-you?thread=work-1')
+  const pane = page.getByRole('complementary', { name: /Thread/ })
+  const field = pane.getByRole('textbox')
+  // The connection fails before the board sees the answer.
+  await page.route('**/api/ui/posts', (route) => route.abort('connectionreset'), { times: 1 })
+  await field.fill('Use 8443.')
+  await field.press('Enter')
+  await expect(pane.getByRole('button', { name: 'Retry' })).toBeVisible()
+
+  await host.submit({ ...agent, rid: 'ask-2', root: 'work-1', kind: 'ask', text: 'Which host?' })
+  await host.pass()
+  await page.clock.runFor(15_000)
+  await expect(pane.getByText('A new question arrived: “Which host?” Your reply is kept.')).toBeVisible()
+  await expect(pane.getByRole('button', { name: 'Answer this question' })).toHaveCount(0)
+  await field.press('Enter')
+  expect(host.writes).toHaveLength(0)
+
+  await pane.getByRole('button', { name: 'Discard' }).click()
+  await pane.getByRole('button', { name: 'Answer this question' }).click()
+  await field.press('Enter')
+  await expect(pane.locator('.composer-hint')).toContainText('Saved to the board.')
+  expect(host.writes).toHaveLength(1)
+  expect(JSON.parse(host.writes[0]!)).toMatchObject({ kind: 'answer', re: 'ask-2', text: 'Use 8443.' })
+})
+
+test('A retry refused with 503 keeps the unconfirmed write: after recovery, Retry replays it and nothing is saved twice', async ({ page, host }) => {
+  await open(page, host, '#/global')
+  host.dropNextWriteResponse()
+  await composer(page, 'New todo in #global').fill('Saved once.')
+  await composer(page, 'New todo in #global').press('Enter')
+  await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible()
+
+  // The host answers the retry with 503 before it checks the rid.
+  await page.route('**/api/ui/posts', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"the text guard is not loaded"}' }), { times: 1 })
+  await page.getByRole('button', { name: 'Retry' }).click()
+  await expect(page.locator('.field-error')).toContainText("devchat's text guard isn't loaded")
+  await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible()
+  await composer(page, 'New todo in #global').press('Enter')
+  await page.getByRole('button', { name: 'Send' }).click()
+  expect(host.writes).toHaveLength(1)
+
+  await page.getByRole('button', { name: 'Retry' }).click()
+  await expect(rows(page, 'Open todos in #global')).toHaveCount(1)
+  expect(host.writes).toHaveLength(2)
+  expect(host.writes[1]).toBe(host.writes[0])
+  expect((await posts(host, 'todos')).map((post) => post.text)).toEqual(['Saved once.'])
+})
+
+test('Resolve stays locked after the board confirms it until the pane shows the thread resolved', async ({ page, host }) => {
+  await host.submit({ ...agent, rid: 'todo-1', kind: 'todo', channel: 'todos', text: 'Water the plants.' })
+  await host.pass()
+  await open(page, host, '#/global?thread=todo-1')
+  const pane = page.getByRole('complementary', { name: /Thread/ })
+  let release = () => {}
+  const held = new Promise<void>((resolve) => { release = resolve })
+  let hold = false
+  await page.route('**/api/ui/**', async (route) => {
+    if (hold && route.request().method() === 'GET') await held
+    await route.continue()
+  })
+  hold = true
+  await pane.getByRole('button', { name: 'Resolve' }).click()
+  await expect.poll(() => host.writes.length).toBe(1)
+  await expect(pane.getByRole('button', { name: 'Resolve' })).toBeDisabled()
+  await pane.getByRole('button', { name: 'Resolve' }).click({ force: true })
+  expect(host.writes).toHaveLength(1)
+  hold = false
+  release()
+  await expect(pane.locator('.pane-head .badge')).toHaveText('Done')
+  await expect(pane.getByRole('button', { name: 'Resolve' })).toHaveCount(0)
+  expect(host.writes).toHaveLength(1)
+  expect((await posts(host, 'todos')).filter((post) => post.labels.kind === 'done')).toHaveLength(1)
+})
+
 test('Send stays locked until the confirmed draft is cleared, even while the read after it is held', async ({ page, host }) => {
   await open(page, host, '#/global')
   let release = () => {}
@@ -385,27 +464,54 @@ test('"You answered" shows the user\'s answer, not an agent note posted after it
   await expect(answered.first()).toContainText('You')
 })
 
-test('A work item shows its issue, pull requests, and source thread, linked only from values that check out', async ({ page, host }) => {
-  await host.submit({ ...agent, rid: 'work-1', kind: 'work', channel: 'work', text: 'Ship the exporter.', repo: 'example/one', issue: 'example/one#12', thread: 'desktop:abc' })
+test('A work item shows its issue and pull requests, linked only from values that check out, and its source thread ID to copy', async ({ page, host }) => {
+  await host.submit({ ...agent, rid: 'work-1', kind: 'work', channel: 'work', text: 'Ship the exporter.', repo: 'example/one', issue: 'example/one#12', thread: 'thread-7f3a' })
   await host.submit({ ...agent, rid: 'note-1', root: 'work-1', kind: 'note', text: 'Opened the PR.', pr: 'https://github.com/example/one/pull/34' })
-  await host.submit({ ...agent, rid: 'work-2', kind: 'work', channel: 'work', text: 'Odd refs.', repo: 'example/100%done', issue: 'javascript:alert(1)', thread: 'https://example.com/t/1' })
-  await host.submit({ ...agent, rid: 'note-2', root: 'work-2', kind: 'note', text: 'A PR.', pr: 'javascript:alert(1)//pull/7' })
+  await host.submit({ ...agent, rid: 'note-2', root: 'work-1', kind: 'note', text: 'And one in the service.', pr: 'https://github.com/example/service/pull/35' })
+  await host.submit({ ...agent, rid: 'work-2', kind: 'work', channel: 'work', text: 'Odd refs.', repo: 'example/one', issue: 'javascript:alert(1)', thread: 'https://example.com/t/1' })
+  await host.submit({ ...agent, rid: 'note-3', root: 'work-2', kind: 'note', text: 'A PR.', pr: 'javascript:alert(1)//pull/7' })
+  await host.submit({ ...agent, rid: 'note-4', root: 'work-2', kind: 'note', text: 'Elsewhere.', pr: 'https://gitlab.example.com/example/one/pull/8' })
   await host.pass()
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
 
   await open(page, host, '#/needs-you?thread=work-1')
   const pane = page.getByRole('complementary', { name: /Thread/ })
   await expect(pane.getByRole('link', { name: 'Issue example/one#12' })).toHaveAttribute('href', 'https://github.com/example/one/issues/12')
   await expect(pane.getByRole('link', { name: 'PR #34' })).toHaveAttribute('href', 'https://github.com/example/one/pull/34')
-  await expect(pane.getByText('From thread desktop:abc')).toBeVisible()
-  await expect(pane.getByRole('link', { name: 'From thread desktop:abc' })).toHaveCount(0)
+  // A pull request in another repo opens there, never on the item's repo.
+  await expect(pane.getByRole('link', { name: 'PR example/service#35' })).toHaveAttribute('href', 'https://github.com/example/service/pull/35')
+  // The source thread is a bare T3 Code thread ID: text, with a button that copies it.
+  await expect(pane.getByText('From thread thread-7f3a')).toBeVisible()
+  await expect(pane.getByRole('link', { name: /thread-7f3a/ })).toHaveCount(0)
+  await pane.getByRole('button', { name: 'Copy ID' }).click()
+  await expect(pane.getByRole('button', { name: 'Copied' })).toBeVisible()
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('thread-7f3a')
 
   await open(page, host, '#/needs-you?thread=work-2')
   await expect(pane.getByText('Issue javascript:alert(1)')).toBeVisible()
   await expect(pane.getByRole('link', { name: /^Issue/ })).toHaveCount(0)
   await expect(pane.getByText('PR #7')).toBeVisible()
-  await expect(pane.getByRole('link', { name: 'PR #7' })).toHaveCount(0)
-  await expect(pane.getByRole('link', { name: 'From thread https://example.com/t/1' })).toHaveAttribute('href', 'https://example.com/t/1')
+  await expect(pane.getByText('PR #8')).toBeVisible()
+  await expect(pane.getByRole('link', { name: /^PR/ })).toHaveCount(0)
+  await expect(pane.getByRole('link', { name: /example\.com/ })).toHaveCount(0)
+  await expect(pane.getByText('From thread https://example.com/t/1')).toBeVisible()
   expect(await page.locator('a[href^="javascript:" i]').count()).toBe(0)
+})
+
+test('Without the Clipboard API, as on the tailnet plain-http origin, Copy ID copies through the copy command', async ({ page, host }) => {
+  await host.submit({ ...agent, rid: 'work-1', kind: 'work', channel: 'work', text: 'Ship the exporter.', thread: 'thread-7f3a' })
+  await host.pass()
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', { value: undefined })
+    document.addEventListener('copy', () => {
+      (window as unknown as { copied: string }).copied = document.getSelection()?.toString() ?? ''
+    })
+  })
+  await open(page, host, '#/needs-you?thread=work-1')
+  const pane = page.getByRole('complementary', { name: /Thread/ })
+  await pane.getByRole('button', { name: 'Copy ID' }).click()
+  await expect(pane.getByRole('button', { name: 'Copied' })).toBeVisible()
+  expect(await page.evaluate(() => (window as unknown as { copied: string }).copied)).toBe('thread-7f3a')
 })
 
 test('A repo name with % links and opens its channel; a malformed link shows not found', async ({ page, host }) => {
@@ -417,8 +523,12 @@ test('A repo name with % links and opens its channel; a malformed link shows not
   await expect(rows(page, 'Open work items in #100%done')).toHaveCount(1)
   expect(page.url()).toContain('#/repo/example/100%25done')
 
-  await page.goto(`${host.url}#/repo/example/100%done`)
-  await expect(page.getByRole('heading', { name: 'Not found', level: 1 })).toBeVisible()
+  for (const hash of ['#/repo/example/100%done', '#/repo/example/', '#/repo/', '#/repo', '#/repo//one']) {
+    await page.goto(`${host.url}#/needs-you`)
+    await expect(page.getByRole('heading', { name: 'Needs you', level: 1 })).toBeVisible()
+    await page.goto(`${host.url}${hash}`)
+    await expect(page.getByRole('heading', { name: 'Not found', level: 1 }), hash).toBeVisible()
+  }
 })
 
 test('Guarded text is refused with the guard\'s reason and never echoed, and nothing is saved', async ({ page, host }) => {
@@ -438,8 +548,11 @@ test.describe('without a guard', () => {
     await open(page, host, '#/global')
     await composer(page, 'New todo in #global').fill('Check the logs.')
     await composer(page, 'New todo in #global').press('Enter')
-    await expect(page.locator('.field-error')).toHaveText("Not saved: devchat's text guard isn't loaded, so it refuses every write until the host is fixed.")
+    await expect(page.locator('.field-error')).toHaveText("Not sent: devchat's text guard isn't loaded, so it refuses every write until the host is fixed. Your text is kept; retry then.")
     await expect(composer(page, 'New todo in #global')).toHaveValue('Check the logs.')
+    // A 503 proves nothing about the rid, so the write waits for Retry or Discard.
+    await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Discard' })).toBeVisible()
     expect(await posts(host, 'todos')).toEqual([])
   })
 })

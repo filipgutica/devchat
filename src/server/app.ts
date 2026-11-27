@@ -1,6 +1,6 @@
 import { board, BoardError, type Board } from '@vercel/board'
-import { readdirSync, realpathSync, type Dirent } from 'node:fs'
-import { readFile, realpath } from 'node:fs/promises'
+import { constants, readdirSync, realpathSync, type Dirent } from 'node:fs'
+import { open, realpath } from 'node:fs/promises'
 import { createServer, type ServerResponse } from 'node:http'
 import { extname, join, relative, sep } from 'node:path'
 import { boardMarker } from '../shared/layout.ts'
@@ -68,10 +68,30 @@ function listShell(dir: string): Shell {
   for (const entry of entries) {
     // A symlink is not a regular file here, and nothing under a dot-named folder is listed.
     const name = relative(root, join(entry.parentPath, entry.name))
-    if (!entry.isFile() || name.split(sep).some((part) => part.startsWith('.'))) continue
+    if (!entry.isFile() || hasDotPart(root, join(root, name))) continue
     if (Object.hasOwn(shellTypes, extname(name))) files.set(`/${name.split(sep).join('/')}`, join(root, name))
   }
   return { root, files }
+}
+
+const hasDotPart = (root: string, file: string) => relative(root, file).split(sep).some((part) => part.startsWith('.'))
+
+/**
+ * A listed file's bytes, checked again at request time, since the build can change after the
+ * listing: its path still resolves to itself inside the build, so no part of it is a symlink, it has
+ * no dot-named part, and what opens is a regular file. O_NOFOLLOW refuses a symlink swapped in
+ * between the check and the open. Null when any check fails.
+ */
+async function readShellFile(root: string, file: string) {
+  if (!file.startsWith(root + sep) || hasDotPart(root, file)) return null
+  if ((await realpath(file).catch(() => null)) !== file) return null
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => null)
+  if (handle === null) return null
+  try {
+    return (await handle.stat()).isFile() ? await handle.readFile() : null
+  } finally {
+    await handle.close()
+  }
 }
 
 /** Answers a GET or HEAD for one of the shell's files: `/` is `index.html`, and `assets/` holds hashed names. */
@@ -80,10 +100,8 @@ async function serveShell({ root, files }: Shell, path: string, method: string |
   const file = files.get(urlPath)
   if (!file) return void response.writeHead(404).end()
   if (method !== 'GET' && method !== 'HEAD') return void response.writeHead(405, { Allow: 'GET, HEAD' }).end()
-  // The build can change after the listing: serve only a file that still resolves inside the build.
-  const real = await realpath(file).catch(() => null)
-  if (real === null || !real.startsWith(root + sep)) return void response.writeHead(404).end()
-  const body = await readFile(real)
+  const body = await readShellFile(root, file)
+  if (body === null) return void response.writeHead(404).end()
   response.writeHead(200, {
     'Content-Type': shellTypes[extname(file)],
     'Content-Length': body.length,

@@ -111,10 +111,17 @@ export function newRid() {
  * a new attempt may take a new one; it is unknown after a network failure or a server error, when
  * only a retry with the same rid and body is safe.
  */
+/**
+ * A write's answer. `settled` is set only when the answer proves this rid's fate: 200 or 201 wrote
+ * it, and 400, 409, or 422 refused this very body, so it can never be written. Anything else, such
+ * as a network failure, a 503, or another server error, leaves the outcome unknown.
+ */
 export type WriteOutcome =
   | { ok: true }
-  | { ok: false; written: false; message: string }
-  | { ok: false; written: 'unknown'; message: string }
+  | { ok: false; settled: boolean; message: string }
+
+/** The answers that refuse a body for good: an invalid write, a rid conflict, or the text guard. */
+const settles = new Set([400, 409, 422])
 
 /** What each refusal tells the user. None repeats the refused text: it may hold a secret. */
 const refusals: Record<string, string> = {
@@ -136,22 +143,22 @@ export async function sendWrite(body: UserWrite): Promise<WriteOutcome> {
       cache: 'no-store',
     })
   } catch {
-    return { ok: false, written: 'unknown', message: "Not sent: devchat can't be reached. Your text is kept; retry when it's back." }
+    return { ok: false, settled: false, message: "Not sent: devchat can't be reached. Your text is kept; retry when it's back." }
   }
   if (response.status === 200 || response.status === 201) return { ok: true }
-  if (isUnreachable(response.status) || response.status >= 500 && response.status !== 503) {
-    return { ok: false, written: 'unknown', message: 'Not sent: devchat had an error. Your text is kept; retry to send it once.' }
-  }
   if (response.status === 503) {
-    return { ok: false, written: false, message: "Not saved: devchat's text guard isn't loaded, so it refuses every write until the host is fixed." }
+    return { ok: false, settled: false, message: "Not sent: devchat's text guard isn't loaded, so it refuses every write until the host is fixed. Your text is kept; retry then." }
+  }
+  if (isUnreachable(response.status) || response.status >= 500) {
+    return { ok: false, settled: false, message: 'Not sent: devchat had an error. Your text is kept; retry to send it once.' }
   }
   const reason = await refusalOf(response)
   if (response.status === 422) {
     const why = reason.detail ? ` (${reason.detail})` : ''
-    return { ok: false, written: false, message: `Not saved: the text guard refused this text${why}. Remove that part and send again.` }
+    return { ok: false, settled: true, message: `Not saved: the text guard refused this text${why}. Remove that part and send again.` }
   }
   const message = (reason.refused && refusals[reason.refused]) ?? `Not saved: devchat refused this write (${response.status}).`
-  return { ok: false, written: false, message }
+  return { ok: false, settled: settles.has(response.status), message }
 }
 
 /** The route's refusal and, for the guard, its reason, such as "credential assignment". */

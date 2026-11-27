@@ -56,6 +56,8 @@ main:focus { outline: none; }
 .quiet { padding: var(--space-2); color: var(--color-muted); font-size: var(--text-sm); }
 .list-section { margin-top: var(--space-6); }
 .list-section h2 { padding: 0 var(--space-2) var(--space-1); font-size: var(--text-md); }
+.source-thread { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-2); min-width: 0; }
+.source-thread > button { white-space: nowrap; }
 .composer-note { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-2); font-size: var(--text-sm); }
 .thread-pane { min-height: 0; max-width: 100%; }
 .thread-pane > .composer { padding-top: var(--space-2); }

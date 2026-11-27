@@ -110,6 +110,12 @@ export function ThreadPane({ rid, thread, repos, offline, onClose, onSaved }: Th
   const labels = root?.labels ?? {}
   const resolved = isResolved(labels.status)
   const resolveError = resolve.state.status === 'error' ? resolve.state.message : null
+  // A confirmed resolve keeps Resolve locked until the pane shows the thread resolved, so a second
+  // click while the page reads the board again writes nothing.
+  const { reset: resetResolve } = resolve
+  useEffect(() => {
+    if (resolved) resetResolve()
+  }, [resolved, resetResolve])
 
   async function onResolve() {
     // Resolve removes itself, so focus moves to the heading; a refusal returns it to Resolve.
@@ -132,7 +138,7 @@ export function ThreadPane({ rid, thread, repos, offline, onClose, onSaved }: Th
         {root && <StateBadge labels={labels} />}
         {root && !resolved && (
           <Button ref={resolveButton} data-variant="secondary" data-size="sm" aria-busy={resolve.state.status === 'busy' ? 'true' : undefined}
-            disabled={offline || resolve.state.status === 'busy'} onClick={() => void onResolve()}>
+            disabled={offline || resolve.state.status === 'busy' || resolve.state.status === 'saved'} onClick={() => void onResolve()}>
             Resolve
           </Button>
         )}
