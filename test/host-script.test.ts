@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { installSteps, renderPlan, renderScript, uninstallSteps } from '../src/host/script.ts'
 import type { Settings } from '../src/host/settings.ts'
@@ -33,7 +36,7 @@ test('install closes the default grants before the board serves the tailnet, and
   for (const line of serves) assert.doesNotMatch(line, /--tailscale/)
   assert.match(steps[lock]?.bash ?? '', /board_setup --lock\b/)
   // A running board that is not locked stops at once, then loses its tailnet routes, then is relocked.
-  assert.match(steps[lock]?.bash ?? '', /board_setup --lock-check[\s\S]*systemctl stop devchat-export\.timer devchat-board\.service[\s\S]*converge_serve --remove[\s\S]*board_setup --lock\b/)
+  assert.match(steps[lock]?.bash ?? '', /board_setup --lock-check[\s\S]*systemctl stop devchat-export\.timer devchat-board\.service[\s\S]*remove_routes \|\| fail[\s\S]*board_setup --lock\b/)
 })
 
 test('install checks every destination before its first write, and stages only in its own directory', () => {
@@ -72,10 +75,10 @@ test('safe_path refuses a symlink and a world-writable directory on the path', (
 test('--no-expose leaves tailscale out of install, and uninstall keeps data unless --purge', () => {
   const local = installSteps({ settings, ...sources, expose: false })
   assert.ok(!local.some(({ title }) => /expose/.test(title)))
-  assert.doesNotMatch(renderScript(local), /^converge_serve$/m)
+  assert.doesNotMatch(renderScript(local), /^plan=\$\(serve_plan\)/m)
   const kept = renderScript(uninstallSteps({ expose: true, purge: false }))
-  // Uninstall removes devchat's mounts as planned from the recorded settings, never a whole port.
-  assert.match(kept, /converge_serve --remove/)
+  // Uninstall removes devchat's mounts as planned from the recorded routes, never a whole port.
+  assert.match(kept, /remove_routes \|\| fail/)
   assert.doesNotMatch(kept, /tailscale serve --https=\S+ off/)
   assert.doesNotMatch(kept, /userdel|rm -rf \/var\/lib\/devchat/)
   assert.match(renderScript(uninstallSteps({ expose: false, purge: true })), /userdel devchat/)
@@ -123,4 +126,42 @@ test('the units run root-owned files as the service account, with no access to a
     assert.equal(execStart?.[1], '/opt/devchat/bin/node', name)
     assert.ok(execStart?.[2]?.startsWith('/opt/devchat/app/'), name)
   }
+})
+
+/** Runs one install step with the install script's helpers, the given stubs, and a private staging directory. */
+function runStep(pattern: RegExp, stubs: string) {
+  const steps = installSteps({ settings, ...sources, expose: true })
+  const first = steps[0]?.bash ?? ''
+  const step = steps.find(({ title }) => pattern.test(title))
+  const stage = mkdtempSync(join(tmpdir(), 'devchat-stage-'))
+  try {
+    return bash(renderScript([{ title: 'stubbed', bash: `STAGE=${stage}\n${first.slice(first.indexOf('board_setup() {'))}\n${stubs}\n${step?.bash}` }]))
+  } finally {
+    rmSync(stage, { recursive: true, force: true })
+  }
+}
+
+test('a board that is not locked stays stopped, and is not relocked, when its routes cannot be confirmed gone', () => {
+  const result = runStep(/lock it, on loopback only/, `
+systemctl() { [ "$1" = is-active ] || echo "systemctl $*"; }
+board_setup() { echo "board_setup $*"; [ "$1" != --lock-check ]; }
+tailscale() { return 1; }`)
+  assert.equal(result.status, 1)
+  assert.match(result.stdout, /systemctl stop devchat-export\.timer devchat-board\.service/)
+  assert.match(result.stderr, /tailscale serve status failed[\s\S]*could not be confirmed: it stays stopped/)
+  assert.doesNotMatch(result.stdout, /board_setup --lock$|cli\.mjs serve|systemctl (start|restart)/m)
+})
+
+test('a failure after the routes change stops the board and removes devchat mounts, or says it could not', () => {
+  const stubs = (removal: string) => `
+systemctl() { echo "systemctl $*"; }
+serve_plan() { if [ "\${1:-}" = --remove ]; then ${removal}; else echo set; fi; }
+tailscale() { echo "tailscale $*"; case "$*" in *'--set-path=/ http'*) return 1 ;; *' off') touch "$STAGE/removed" ;; esac; }`
+  const removed = runStep(/^Only now, expose/, stubs(`[ -e "$STAGE/removed" ] || echo 'off 8443 /'`))
+  assert.equal(removed.status, 1)
+  assert.match(removed.stdout, /systemctl stop devchat-export\.timer devchat-board\.service[\s\S]*tailscale serve --https=8443 --set-path=\/ off/)
+  assert.match(removed.stderr, /applying the tailnet routes failed[\s\S]*routes are removed and the board is stopped/)
+  const stuck = runStep(/^Only now, expose/, stubs(`echo 'off 8443 /'`))
+  assert.equal(stuck.status, 1)
+  assert.match(stuck.stderr, /devchat mounts remain[\s\S]*could not be confirmed, and the board is stopped/)
 })

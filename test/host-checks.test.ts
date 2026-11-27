@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { GrantView } from '@vercel/board'
 import { desiredGrants, lockProblems } from '../src/host/grants.ts'
-import { parseServeStatus, planServe } from '../src/host/serve.ts'
+import { parseSelfName, parseServeStatus, planServe } from '../src/host/serve.ts'
 import { settingsSchema, type Settings } from '../src/host/settings.ts'
 import { parseUnitShow } from '../src/host/verify.ts'
 
@@ -19,30 +19,48 @@ const metrics = { '/metrics': 'http://127.0.0.1:9100' }
 const devchat = (board: number, app: number) => ({ '/api/board': `http://127.0.0.1:${board}/api/board`, '/': `http://127.0.0.1:${app}` })
 const ours = 'host.example.ts.net:8443'
 
-test('planServe sets the routes once, over HTTPS with Funnel off, and spares other services', () => {
-  const plan = (status: string, options = {}) => planServe(parseServeStatus(status), settings, options)
+const self = 'host.example.ts.net'
+const plan = (status: string, options = {}, host = self) => planServe(parseServeStatus(status), settings, host, options)
+
+test('planServe sets the routes only on a port devchat has to itself, over HTTPS with Funnel off', () => {
   assert.deepEqual(plan('No serve config'), ['set'])
   assert.deepEqual(plan(web({ 'host.example.ts.net:443': t3 })), ['set'])
   assert.deepEqual(plan(web({ 'host.example.ts.net:443': t3, [ours]: devchat(4100, 4101) })), ['unchanged'])
-  // Exact targets are not enough: Funnel on, or a listener that is not HTTPS, means set again.
-  assert.deepEqual(plan(web({ [ours]: devchat(4100, 4101) }, { funnel: [ours] })), ['set'])
-  assert.deepEqual(plan(web({ [ours]: devchat(4100, 4101) }, { http: [ours] })), ['set'])
-  assert.throws(() => plan(web({ [ours]: t3 })), /:8443\/ already serves http:\/\/127\.0\.0\.1:3773/)
+  // A partial set, or devchat's recorded targets on the same port, is devchat's to set again.
+  assert.deepEqual(plan(web({ [ours]: { '/': 'http://127.0.0.1:4101' } })), ['set'])
+  assert.deepEqual(plan(web({ [ours]: devchat(4200, 4201) }), { recorded: { httpsPort: 8443, boardPort: 4200, appPort: 4201 } }), ['set'])
+  // Anything else on the port refuses, with nothing to apply, and says how to clear it.
+  for (const [status, blocker] of [
+    [web({ [ours]: { ...devchat(4100, 4101), ...metrics } }), /:8443\/metrics serves http:\/\/127\.0\.0\.1:9100/],
+    [web({ [ours]: { ...devchat(4100, 4101), '/api/board/': 'http://127.0.0.1:4100/api/board' } }), /:8443\/api\/board\/ serves/],
+    [web({ [ours]: devchat(4100, 4200) }), /:8443\/ serves http:\/\/127\.0\.0\.1:4200/],
+    [web({ [ours]: devchat(4100, 4101) }, { funnel: [ours] }), /Funnel is on for host\.example\.ts\.net:8443/],
+    [web({ [ours]: devchat(4100, 4101) }, { http: [ours] }), /port 8443 is not only an HTTPS listener/],
+    [web({ 'svc.example.ts.net:8443': t3 }), /svc\.example\.ts\.net:8443 shares port 8443/],
+  ] as const) {
+    assert.throws(() => plan(status), (error: Error) => blocker.test(error.message) && error.message.includes('`tailscale serve --https=8443 off`'), String(blocker))
+  }
 })
 
-test('planServe removes only devchat mounts, found by recorded host and targets, never a whole port', () => {
-  const plan = (status: string, options = {}) => planServe(parseServeStatus(status), settings, options)
+test('planServe plans against the live name, and refuses a --host that is not it', () => {
+  assert.throws(() => plan('No serve config', {}, 'host.other.ts.net'), /--host host\.example\.ts\.net is not this node's tailnet name, host\.other\.ts\.net/)
+  assert.equal(parseSelfName('{"Self":{"DNSName":"Host.Example.ts.net."}}'), self)
+  assert.throws(() => parseSelfName('{"Self":{"DNSName":""}}'), /MagicDNS/)
+  // Removal needs no --host match: it removes devchat's mounts at the live name.
+  assert.deepEqual(plan(web({ 'host.other.ts.net:8443': devchat(4100, 4101) }), { remove: true }, 'host.other.ts.net'), ['off 8443 /api/board', 'off 8443 /'])
+})
+
+test('planServe removes only devchat mounts on its recorded and current ports', () => {
   const old = 'host.example.ts.net:9443'
-  // devchat moved from 9443: its two mounts go, the unrelated /metrics on the same port stays.
-  assert.deepEqual(plan(web({ [old]: { ...devchat(4100, 4101), ...metrics } })), ['off 9443 /api/board', 'off 9443 /', 'set'])
-  assert.deepEqual(plan(web({ [old]: { ...devchat(4100, 4101), ...metrics }, [ours]: devchat(4100, 4101) }), { remove: true }),
+  const recorded = { httpsPort: 9443, boardPort: 4200, appPort: 4201 }
+  // An interrupted move from 9443: the record still names it, so its mounts go; /metrics stays.
+  assert.deepEqual(plan(web({ [old]: { ...devchat(4200, 4201), ...metrics } }), { recorded }), ['off 9443 /api/board', 'off 9443 /', 'set'])
+  assert.deepEqual(plan(web({ [old]: devchat(4200, 4201), [ours]: devchat(4100, 4101) }), { recorded }), ['off 9443 /api/board', 'off 9443 /'])
+  assert.deepEqual(plan(web({ [old]: { ...devchat(4200, 4201), ...metrics }, [ours]: devchat(4100, 4101) }), { recorded, remove: true }),
     ['off 9443 /api/board', 'off 9443 /', 'off 8443 /api/board', 'off 8443 /'])
-  // Mounts at another host, or with targets devchat never recorded, are someone else's.
-  assert.deepEqual(plan(web({ 'other.example.ts.net:9443': devchat(4100, 4101), [old]: devchat(4200, 4201) })), ['set'])
-  // The settings an earlier install recorded find its mounts after a port change.
-  const previous = { ...settings, httpsPort: 9443, boardPort: 4200, appPort: 4201 }
-  assert.deepEqual(plan(web({ [old]: { ...devchat(4200, 4201), ...metrics } }), { previous }), ['off 9443 /api/board', 'off 9443 /', 'set'])
-  assert.deepEqual(plan(web({ [ours]: devchat(4200, 4201) }), { previous }), ['off 8443 /api/board', 'off 8443 /', 'set'])
+  // Without the record, a port devchat never recorded is someone else's.
+  assert.deepEqual(plan(web({ [old]: devchat(4200, 4201) })), ['set'])
+  assert.deepEqual(plan(web({ [old]: devchat(4200, 4201) }), { remove: true }), [])
 })
 
 test('lockProblems accepts only devchat grants, with the login grant at most as intended', () => {

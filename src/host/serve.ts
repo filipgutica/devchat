@@ -1,9 +1,9 @@
 import { z } from 'zod'
-import { boardUrl, type Settings } from './settings.ts'
+import { boardUrl, settingsSchema, type Settings } from './settings.ts'
 
 /** The part of `tailscale serve status --json` the plan reads. */
 const serveStatus = z.object({
-  TCP: z.record(z.string(), z.object({ HTTPS: z.boolean().optional() }).passthrough()).optional(),
+  TCP: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
   Web: z.record(z.string(), z.object({
     Handlers: z.record(z.string(), z.object({ Proxy: z.string().optional() }).passthrough()).optional(),
   }).passthrough()).optional(),
@@ -15,50 +15,73 @@ export function parseServeStatus(text: string) {
   return serveStatus.parse(text.trim().startsWith('{') ? JSON.parse(text) : {})
 }
 
-/** devchat's two mounts for one set of settings: path and the loopback target it proxies to. */
-const mounts = (settings: Settings) => [
-  { path: '/api/board', target: boardUrl(settings) },
-  { path: '/', target: `http://127.0.0.1:${settings.appPort}` },
-] as const
+/** This node's live MagicDNS name from `tailscale status --json`: the name tailscale serve uses. */
+export function parseSelfName(text: string) {
+  const name = z.object({ Self: z.object({ DNSName: z.string() }).passthrough() }).passthrough()
+    .parse(JSON.parse(text)).Self.DNSName.replace(/\.$/, '').toLowerCase()
+  if (!name) throw new Error('tailscale reports no DNS name for this node: turn on MagicDNS for the tailnet')
+  return name
+}
+
+/** The routes an install exposed, recorded in `/etc/devchat/routes.json` once tailscale serves them. */
+export const routesSchema = settingsSchema.pick({ httpsPort: true, boardPort: true, appPort: true }).strict()
+export type Routes = z.infer<typeof routesSchema>
+
+/** devchat's two mounts: path and the loopback target it proxies to. */
+const mounts = (routes: Routes) => [
+  { path: '/api/board', target: boardUrl(routes) },
+  { path: '/', target: `http://127.0.0.1:${routes.appPort}` },
+]
 
 type PlanOptions = {
-  /** The settings an earlier install recorded, so its mounts are found after a port change. */
-  previous?: Settings | undefined
-  /** Plan only the removal of every devchat mount. */
+  /** The routes a finished install recorded, so its mounts are found after a change. */
+  recorded?: Routes | undefined
+  /** Plan only the removal of devchat's mounts. */
   remove?: boolean
 }
 
 /**
- * What to change so tailscale serves devchat exactly at the settings' HTTPS port, as lines:
- * `off <port> <path>` for each devchat mount to remove, then `set` when the port is not exactly
- * devchat's, over HTTPS, with Funnel off (`tailscale serve` turns Funnel off for the port it sets),
- * or `unchanged` when nothing changes. A devchat mount is one at the recorded host whose path and target are
- * devchat's under the current or previous settings; nothing else on any port is touched.
+ * What to change so tailscale serves devchat at `settings`, as lines: `off <port> <path>` for each
+ * devchat mount to remove, then `set`, or `unchanged`. devchat owns its HTTPS port: the plan sets
+ * routes only on a port that is empty or holds nothing but devchat's mounts, over HTTPS, with
+ * Funnel off, and throws, naming what blocks it, otherwise. A devchat mount is a handler at this
+ * node's live name `self`, on the recorded or the current port, with devchat's path and target.
+ * With `remove`, the plan lists those mounts only, and skips the `--host` check.
  */
-export function planServe(status: z.infer<typeof serveStatus>, settings: Settings, { previous, remove = false }: PlanOptions = {}) {
-  const ours = [settings, ...(previous ? [previous] : [])].flatMap((recorded) =>
-    mounts(recorded).map(({ path, target }) => ({ host: recorded.host, path, target })))
-  const wanted = mounts(settings)
-  const origin = `${settings.host}:${settings.httpsPort}`
-  const lines: string[] = []
-  for (const [key, { Handlers = {} }] of Object.entries(status.Web ?? {})) {
-    const at = key.lastIndexOf(':')
-    const host = key.slice(0, at)
-    const port = Number(key.slice(at + 1))
-    for (const [path, { Proxy }] of Object.entries(Handlers)) {
-      const isOurs = ours.some((mount) => mount.host === host && mount.path === path && mount.target === Proxy)
-      const isWanted = key === origin && wanted.some((mount) => mount.path === path && mount.target === Proxy)
-      if (isOurs && (remove || !isWanted)) lines.push(`off ${port} ${path}`)
-      else if (key === origin && !isOurs && wanted.some((mount) => mount.path === path)) {
-        throw new Error(`${origin}${path} already serves ${Proxy ?? 'something else'}; pick another --https-port`)
-      }
-    }
+export function planServe(status: z.infer<typeof serveStatus>, settings: Settings, self: string, { recorded, remove = false }: PlanOptions = {}) {
+  if (!remove && settings.host.toLowerCase() !== self) {
+    throw new Error(`--host ${settings.host} is not this node's tailnet name, ${self}: tailscale serves ${self}, so rerun with --host ${self}`)
   }
+  const handlersAt = (port: number) => status.Web?.[`${self}:${port}`]?.Handlers ?? {}
+  const ours = (port: number) => [settings, ...(recorded ? [recorded] : [])]
+    .filter((routes) => routes.httpsPort === port).flatMap(mounts)
+  const isOurs = (port: number, path: string, proxy: string | undefined) =>
+    ours(port).some((mount) => mount.path === path && mount.target === proxy)
+  const lines = [...new Set([...(recorded ? [recorded.httpsPort] : []), settings.httpsPort])]
+    .filter((port) => remove || port !== settings.httpsPort)
+    .flatMap((port) => Object.entries(handlersAt(port))
+      .filter(([path, { Proxy }]) => isOurs(port, path, Proxy)).map(([path]) => `off ${port} ${path}`))
   if (remove) return lines
-  const handlers = status.Web?.[origin]?.Handlers ?? {}
-  const exact = wanted.every(({ path, target }) => handlers[path]?.Proxy === target)
-  const https = status.TCP?.[String(settings.httpsPort)]?.HTTPS === true
-  const funnel = status.AllowFunnel?.[origin] === true
-  if (!exact || !https || funnel) return [...lines, 'set']
+
+  const port = settings.httpsPort
+  const origin = `${self}:${port}`
+  const clear = `clear the port with \`tailscale serve --https=${port} off\` (it removes every route on :${port}, and Funnel), or pick another --https-port`
+  const blockers: string[] = []
+  for (const [path, { Proxy }] of Object.entries(handlersAt(port))) {
+    if (!isOurs(port, path, Proxy)) blockers.push(`${origin}${path} serves ${Proxy ?? 'something other than a proxy'}`)
+  }
+  for (const key of Object.keys(status.Web ?? {})) {
+    if (key !== origin && key.endsWith(`:${port}`)) blockers.push(`${key} shares port ${port}`)
+  }
+  if (status.AllowFunnel?.[origin]) blockers.push(`Funnel is on for ${origin}`)
+  const listener = status.TCP?.[String(port)]
+  const https = listener !== undefined && listener.HTTPS === true && Object.keys(listener).length === 1
+  if (listener && !https) blockers.push(`port ${port} is not only an HTTPS listener: ${JSON.stringify(listener)}${listener.TCPForward ? ` (a TCP forward clears with \`tailscale serve --tcp=${port} off\`)` : ''}`)
+  if (!listener && Object.keys(handlersAt(port)).length > 0) blockers.push(`${origin} has routes but no HTTPS listener`)
+  if (blockers.length > 0) throw new Error(`devchat needs port ${port} to itself: ${blockers.join('; ')}. To use it, ${clear}`)
+
+  const handlers = handlersAt(port)
+  const exact = https && Object.keys(handlers).length === 2 && mounts(settings).every(({ path, target }) => handlers[path]?.Proxy === target)
+  if (!exact) return [...lines, 'set']
   return lines.length > 0 ? lines : ['unchanged']
 }

@@ -10,7 +10,7 @@ import { parseArgs } from 'node:util'
 import { z } from 'zod'
 import { exportBoard } from './export.ts'
 import { boardLockProblems, lockBoard, setupBoard } from './grants.ts'
-import { parseServeStatus, planServe } from './serve.ts'
+import { parseSelfName, parseServeStatus, planServe, routesSchema, type Routes } from './serve.ts'
 import { installSteps, renderPlan, renderScript, uninstallSteps, type Step } from './script.ts'
 import { boardUrl, defaultPorts, hostPaths, readSettings, settingsSchema, unitNames, type Settings } from './settings.ts'
 import { verifyHost } from './verify.ts'
@@ -24,7 +24,7 @@ const usage = `usage: devchat-host <command> [options]
               --login <tailnet login> --host <name>.ts.net [ports as install] [--no-expose]
   status      show the services and what the app reports   [--app-port 4101] [--wait <seconds>]
   uninstall   reverse install with one sudo prompt
-              [--https-port 8443] [--no-expose] [--purge: also delete the board's data] [--dry-run]
+              [--no-expose] [--purge: also delete the board's data] [--dry-run]
   export      write the daily export (the export timer runs it as the service account)
               --config <file> --dir <dir>`
 
@@ -98,6 +98,22 @@ async function openBoardWhenReady(waitSeconds: number) {
   }
 }
 
+/** The routes a finished install recorded, if any. */
+function readRoutes(file: string = hostPaths.routesFile): Routes | undefined {
+  try {
+    return routesSchema.parse(JSON.parse(readFileSync(file, 'utf8')))
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+function tailscale(...args: string[]) {
+  const result = spawnSync('tailscale', args, { encoding: 'utf8' })
+  if (result.status !== 0) throw new Error(`tailscale ${args.join(' ')} failed: ${result.error?.message ?? result.stderr.trim()}`)
+  return result.stdout
+}
+
 const appInfo = z.object({ board: z.object({ reachable: z.boolean() }) }).passthrough()
 
 async function status(appPort: number, waitSeconds: number) {
@@ -132,6 +148,8 @@ async function main(argv: string[]) {
       const { values } = parseArgs({ args: rest, options: { ...settingFlags, node: { type: 'string' }, 'dry-run': { type: 'boolean' } } })
       const settings = await resolveSettings(values)
       const expose = !values['no-expose']
+      // The same plan the root script runs before it exposes anything, here before any change.
+      if (expose) planServe(parseServeStatus(tailscale('serve', 'status', '--json')), settings, parseSelfName(tailscale('status', '--json')), { recorded: readRoutes() })
       const steps = installSteps({
         settings,
         nodeSource: realpathSync(values.node ?? process.execPath),
@@ -191,13 +209,11 @@ async function main(argv: string[]) {
     }
     case 'serve-plan': {
       const { values } = parseArgs({ args: rest, options: {
-        config: { type: 'string' }, previous: { type: 'string' }, status: { type: 'string' }, remove: { type: 'boolean' },
+        config: { type: 'string' }, routes: { type: 'string' }, status: { type: 'string' }, self: { type: 'string' }, remove: { type: 'boolean' },
       } })
-      if (values.status === undefined) throw new Error('serve-plan needs --status <file>')
-      const plan = planServe(parseServeStatus(readFileSync(values.status, 'utf8')), await readSettings(values.config), {
-        previous: values.previous === undefined ? undefined : await readSettings(values.previous),
-        remove: values.remove ?? false,
-      })
+      if (values.status === undefined || values.self === undefined) throw new Error('serve-plan needs --status <file> --self <file>')
+      const plan = planServe(parseServeStatus(readFileSync(values.status, 'utf8')), await readSettings(values.config),
+        parseSelfName(readFileSync(values.self, 'utf8')), { recorded: readRoutes(values.routes), remove: values.remove ?? false })
       for (const line of plan) console.log(line)
       return 0
     }

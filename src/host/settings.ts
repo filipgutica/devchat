@@ -17,6 +17,8 @@ export const hostPaths = {
   appDir: '/opt/devchat/app',
   configDir: '/etc/devchat',
   configFile: '/etc/devchat/app.json',
+  /** The routes tailscale serves for devchat (root 644, readable so install can check them first). */
+  routesFile: '/etc/devchat/routes.json',
   unitDir: '/etc/systemd/system',
 } as const
 
