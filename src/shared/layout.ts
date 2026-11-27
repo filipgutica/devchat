@@ -106,3 +106,17 @@ export const intentSchema = z.discriminatedUnion('kind', [
 ])
 
 export type Intent = z.infer<typeof intentSchema>
+
+/**
+ * A write the user makes in the web UI, as the UI route takes it (§12). The app adds the post's
+ * `rid` and `by=user`: no request sets either. A new todo or work item takes the `repo` of the
+ * project channel in view, or none in #global. An answer carries `re`, the `turn` the UI showed,
+ * while the root has `ask=open` (§2, DC-40).
+ */
+export const userWriteSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.enum(['todo', 'work']), text, repo: labelValue.optional() }),
+  z.strictObject({ kind: z.literal('answer'), root: rid, re: rid.optional(), text }),
+  z.strictObject({ kind: z.literal('done'), root: rid }),
+])
+
+export type UserWrite = z.infer<typeof userWriteSchema>

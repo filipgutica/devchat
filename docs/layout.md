@@ -65,6 +65,20 @@ The package root exports these reasons as `refusalReasons`.
 {"v":1,"rid":"ask-1","kind":"ask","root":"work-1","text":"Can we proceed?","by":"agent","block":1}
 ```
 
+## UI route
+
+The web UI writes only through the app, under `/api/ui/` on the devchat origin. The app answers a request only when `Host` is the configured `<host>:<https port>` and `Tailscale-User-Login` is the configured login. A write is `POST /api/ui/posts` with `Sec-Fetch-Site: same-origin`, the devchat `Origin`, and a JSON body. The package root exports its schema as `userWriteSchema`:
+
+| `kind` | Fields | The app writes |
+| --- | --- | --- |
+| `todo`, `work` | `text`; `repo` of the project channel in view, or none in #global | A root in `todos` or `work` with `rid`, `by=user`, and `repo` |
+| `answer` | `root`, a work item's `rid`; `text`; `re`, the `turn` the UI showed while the root has `ask=open` | A reply with `kind=answer` and `re` |
+| `done` | `root`, a todo's or work item's `rid` | A reply with `kind=done` and the text `Resolved.` |
+
+The app sets each post's `rid` (`ui-<uuid>`) and `by=user`; the schema refuses both fields. It runs its copy of the text guard on `text` first, and refuses every write while the guard is missing. It makes the write between ingest passes, never during one, and folds the thread before it answers with `{rid, state}`, the root's state labels. A refused write answers `refused`: `guard`, `repo` (not allowlisted), `root` (no such root for this kind), `re` (not a question in that thread), or `invalid` (Board refused the post).
+
+The reads `GET /api/ui/needs-you`, `channels`, `threads?channel=todos|work[&repo=<owner>/<repo>][&resolved=1][&before=<older>]`, and `thread?rid=<root rid>` answer from `todos` and `work` only.
+
 ## Shared fixtures
 
 - `@filipgutica/devchat/fixtures/guard.json` contains cases with `name`, `text`, and two expectations: `general`, for the guard every new text passes (Field Guide's new-text patterns), and `workLane`, for the stricter work-lane guard of release 3, which also refuses URLs, file paths, code spans, and ticket keys. The fixture contains synthetic input.

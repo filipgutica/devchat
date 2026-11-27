@@ -1,9 +1,10 @@
 import { board, BoardError, type Board, type MessageView } from '@vercel/board'
+import { randomUUID } from 'node:crypto'
 import { readFile, rename, writeFile } from 'node:fs/promises'
 import { isDeepStrictEqual } from 'node:util'
 import { z } from 'zod'
 import {
-  appMarker, boardMarker, channels, deferredIntentKinds, intentSchema, type Intent, type RefusalReason,
+  appMarker, boardMarker, channels, deferredIntentKinds, intentSchema, type Intent, type RefusalReason, type UserWrite,
 } from '../shared/layout.ts'
 import type { Settings } from '../host/settings.ts'
 import { createBoardPort, type BoardPort } from './board-port.ts'
@@ -36,7 +37,7 @@ async function writeAppState(file: string, state: AppState) {
 }
 
 /** The app's own post with this client ID, or null. Any other error ends the pass. */
-async function findOwn(port: BoardPort, id: string) {
+export async function findOwn(port: BoardPort, id: string) {
   try {
     return await port.getPost(id)
   } catch (error) {
@@ -53,8 +54,8 @@ async function* channelPages(port: BoardPort, channel: string, after: string) {
   }
 }
 
-/** Refolds a thread from its root and writes the state labels that changed (§2, "State is a fold"). */
-async function foldThread(port: BoardPort, rootId: string) {
+/** A thread's root and every reply, oldest first. */
+export async function readWholeThread(port: BoardPort, rootId: string) {
   let page = await port.readThread(rootId, { after: rootId })
   const root = page.message
   const replies: MessageView[] = []
@@ -62,6 +63,12 @@ async function foldThread(port: BoardPort, rootId: string) {
     replies.push(...page.replies)
     page = await port.readThread(rootId, { after: last.id })
   }
+  return { root, replies }
+}
+
+/** Refolds a thread from its root and writes the state labels that changed (§2, "State is a fold"). */
+async function foldThread(port: BoardPort, rootId: string) {
+  const { root, replies } = await readWholeThread(port, rootId)
   const state = foldState(replies.filter(({ deleted }) => !deleted).map(({ labels }) => labels))
   const change = stateChange(root.labels, state)
   try {
@@ -111,13 +118,24 @@ type WriterOptions = {
   openBoard?: () => Board
 }
 
+/** Why the app refuses a UI write it parsed: see `writeUser`. */
+export type UserWriteRefusal = 'repo' | 'root' | 're' | 'invalid'
+
 /**
  * The state writer (§2, §12): the only writer in the conversation channels. Each pass cancels
  * pending `inbox` schedules, ingests `inbox` from `applied` in log order, then folds every thread
- * with a post after the fold cursors. Run one pass at a time.
+ * with a post after the fold cursors. A UI write posts and folds its thread. Passes and UI writes
+ * run one at a time, in call order, so no two interleave on the board.
  */
 export function createStateWriter({ settings, stateFile, openBoard = () => board() }: WriterOptions) {
   let inboxSchedulesCanceled = 0
+  // The tail of the queue of passes and UI writes. A failed task still lets the next one start.
+  let queue: Promise<unknown> = Promise.resolve()
+  function exclusive<T>(task: () => Promise<T>): Promise<T> {
+    const run = queue.then(task)
+    queue = run.catch(() => {})
+    return run
+  }
 
   async function cancelInboxSchedules(port: BoardPort) {
     for (const schedule of await port.listSchedules({ channel: channels.inbox, all: true })) {
@@ -235,7 +253,7 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
     }
   }
 
-  async function pass() {
+  async function runPass() {
     // Board caches its owner token and never rereads it, and a board restart mints a new one (app.ts).
     const port = createBoardPort(openBoard())
     await cancelInboxSchedules(port)
@@ -260,5 +278,49 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
     await writeAppState(stateFile, { epoch, folded })
   }
 
-  return { pass, stats: () => ({ inboxSchedulesCanceled }) }
+  type UserWriteResult = { rid: string; state: Labels } | { refused: UserWriteRefusal }
+
+  /** A new todo or work item, in the channel of its kind. */
+  async function writeUserRoot(port: BoardPort, rid: string, write: Extract<UserWrite, { kind: 'todo' | 'work' }>): Promise<UserWriteResult> {
+    if (write.repo !== undefined && !isAllowlisted(write.repo, settings.allowlist)) return { refused: 'repo' }
+    const channel = write.kind === 'todo' ? channels.todos : channels.work
+    const labels = definedLabels({ rid, by: 'user', repo: write.repo })
+    const root = await writeCanonical(() => port.post(channel, { id: `app:${rid}`, text: write.text, labels }))
+    return root ? { rid, state: await foldThread(port, root.id) } : { refused: 'invalid' }
+  }
+
+  /** An answer under a work item, or a resolve under a todo or work item. */
+  async function writeUserReply(port: BoardPort, rid: string, write: Extract<UserWrite, { root: string }>): Promise<UserWriteResult> {
+    const target = await findOwn(port, `app:${write.root}`)
+    const targetChannels: readonly string[] = write.kind === 'answer' ? [channels.work] : [channels.todos, channels.work]
+    if (!target || target.deleted || target.re !== null || !targetChannels.includes(target.channel)) return { refused: 'root' }
+    const re = write.kind === 'answer' ? write.re : undefined
+    if (re !== undefined) {
+      const question = await findOwn(port, `app:${re}`)
+      if (question?.re !== target.id || question.labels.kind !== 'ask') return { refused: 're' }
+    }
+    const labels = definedLabels({ rid, by: 'user', kind: write.kind, re })
+    const text = write.kind === 'done' ? 'Resolved.' : write.text
+    const reply = await writeCanonical(() => port.reply(target.id, { id: `app:${rid}`, text, labels }))
+    return reply ? { rid, state: await foldThread(port, target.id) } : { refused: 'invalid' }
+  }
+
+  /**
+   * Writes the user's post with `by=user` and its own `rid`, then folds its thread (§2, §12). Returns
+   * the post's `rid` and its root's folded state, or why it is refused: `repo` off the allowlist,
+   * `root` not a root the write may go under, `re` not a question in that thread, or `invalid` when
+   * Board refuses the post.
+   */
+  function writeUserPost(write: UserWrite) {
+    const port = createBoardPort(openBoard())
+    const rid = `ui-${randomUUID()}`
+    return 'root' in write ? writeUserReply(port, rid, write) : writeUserRoot(port, rid, write)
+  }
+
+  return {
+    pass: () => exclusive(runPass),
+    writeUser: (write: UserWrite) => exclusive(() => writeUserPost(write)),
+    stats: () => ({ inboxSchedulesCanceled }),
+  }
 }
+export type StateWriter = ReturnType<typeof createStateWriter>

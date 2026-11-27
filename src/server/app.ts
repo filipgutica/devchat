@@ -2,6 +2,7 @@ import { board, BoardError, type Board } from '@vercel/board'
 import { createServer } from 'node:http'
 import { boardMarker } from '../shared/layout.ts'
 import { createBoardPort } from './board-port.ts'
+import { createUiRoute, type UiRouteOptions } from './ui-route.ts'
 
 type WriterStats = { inboxSchedulesCanceled: number }
 export type AppInfo = { app: 'devchat'; version: string; board: { reachable: boolean }; epoch?: number } & Partial<WriterStats>
@@ -30,13 +31,23 @@ type AppOptions = {
   openBoard?: () => Board
   /** The state writer's counts: `inboxSchedulesCanceled`, which `doctor` reports (§2). */
   writerStats?: () => WriterStats
+  /** Serves the UI route under `/api/ui/` (§12). */
+  ui?: Omit<UiRouteOptions, 'openBoard'>
 }
 
-/** The app's HTTP server. Release 1 serves only `/devchat.json`; it never sends a token. */
-export function createApp({ version, openBoard = () => board(), writerStats }: AppOptions) {
+/** The app's HTTP server: `/devchat.json`, and with `ui` the UI route. It never sends a token. */
+export function createApp({ version, openBoard = () => board(), writerStats, ui }: AppOptions) {
+  const uiRoute = ui && createUiRoute({ ...ui, openBoard })
   return createServer((request, response) => {
-    const path = new URL(request.url ?? '/', 'http://app.invalid').pathname
-    if (path !== '/devchat.json') return void response.writeHead(404).end()
+    const url = new URL(request.url ?? '/', 'http://app.invalid')
+    if (uiRoute && url.pathname.startsWith('/api/ui/')) {
+      return void uiRoute(request, response, url).catch((error: unknown) => {
+        console.error('devchat: UI route failed:', error instanceof Error ? error.message : error)
+        if (!response.headersSent) response.writeHead(500)
+        response.end()
+      })
+    }
+    if (url.pathname !== '/devchat.json') return void response.writeHead(404).end()
     if (request.method !== 'GET') return void response.writeHead(405, { Allow: 'GET' }).end()
     describe(openBoard, version).then((info) => {
       const body: AppInfo = { ...info, ...writerStats?.() }
