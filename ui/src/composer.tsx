@@ -54,7 +54,7 @@ export function Composer({ storeKey, label, hint, offline, toDraft, question, on
   async function attempt(write: PendingWrite) {
     // One change clears the confirmed draft and ends the busy state, so Send can't resend it. A draft
     // edited since keeps its text and the question it is bound to.
-    const confirmed = await attemptWrite(storeKey, write, (current) => (current.text === write.text ? { text: '', bound: null } : {}))
+    const confirmed = await attemptWrite(storeKey, write, (current) => (current.revision === write.revision ? { text: '', bound: null } : {}))
     if (!confirmed) return
     setSaved(true)
     field.current?.focus()
@@ -71,7 +71,7 @@ export function Composer({ storeKey, label, hint, offline, toDraft, question, on
     }
     if (moved) return
     const re = bound ? bound.rid : question?.rid
-    const write: PendingWrite = Object.freeze({ text, body: Object.freeze({ ...toDraft(text, re), rid: newRid() } as UserWrite) })
+    const write: PendingWrite = Object.freeze({ text, revision: readComposer(storeKey).revision, body: Object.freeze({ ...toDraft(text, re), rid: newRid() } as UserWrite) })
     update(() => ({ pending: write }))
     void attempt(write)
   }
@@ -113,6 +113,7 @@ export function Composer({ storeKey, label, hint, offline, toDraft, question, on
             // A new draft binds to the question in view; an emptied one lets go.
             update((current) => ({
               text: next,
+              revision: current.revision + 1,
               bound: next.trim() === '' ? null : current.bound ?? { rid: question?.rid },
             }))
           }}

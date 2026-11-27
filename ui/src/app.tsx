@@ -53,18 +53,24 @@ export function App() {
     const asked = routeRef.current
     const run = ++latest.current
     try {
-      const [needs, channels, threads, opened] = await Promise.all([
+      const { thread: rid } = asked
+      // The open thread's read is applied and stamped on its own, so a failed read of another list
+      // can't drop it; a newer refresh still wins.
+      const opened = rid ? readThread(rid).then((value) => {
+        if (run === latest.current) setThread({ rid, value, readAt: stamp() })
+      }) : undefined
+      const [needs, channels, threads] = await Promise.all([
         read<NeedsYou>('needs-you'),
         read<{ repos: string[] }>('channels'),
         readList(asked.view),
-        asked.thread ? readThread(asked.thread) : Promise.resolve(undefined),
+        opened,
       ])
       // A newer read started meanwhile: its answer is the one to show.
       if (run !== latest.current) return
       setNeedsYou(needs)
       setRepos(channels.repos)
       setList({ key: viewKey(asked.view), threads })
-      setThread(asked.thread && opened !== undefined ? { rid: asked.thread, value: opened, readAt: stamp() } : undefined)
+      if (!rid) setThread(undefined)
       setOffline(false)
       setReadError(null)
       setLoadedAt(new Date().toISOString())

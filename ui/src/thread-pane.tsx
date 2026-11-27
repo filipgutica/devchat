@@ -128,7 +128,7 @@ export function ThreadPane({ rid, thread, readAt, repos, offline, onClose, onSav
 
   function onResolve() {
     if (resolveLocked || readComposer(resolveKey).status.status === 'busy') return
-    const write: PendingWrite = Object.freeze({ text: '', body: Object.freeze({ kind: 'done', root: rid, rid: newRid() } as const) })
+    const write: PendingWrite = Object.freeze({ text: '', revision: 0, body: Object.freeze({ kind: 'done', root: rid, rid: newRid() } as const) })
     updateComposer(resolveKey, () => ({ pending: write }))
     void sendResolve(write)
   }

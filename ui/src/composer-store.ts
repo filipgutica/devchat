@@ -12,7 +12,7 @@ import { sendWrite } from './api.ts'
  * A write sent whose outcome is not known yet. It is immutable: a retry resends
  * exactly this rid and body (D4), and a changed draft never takes its rid.
  */
-export type PendingWrite = Readonly<{ text: string; body: Readonly<UserWrite> }>
+export type PendingWrite = Readonly<{ text: string; body: Readonly<UserWrite>; revision: number }>
 
 export type Status =
   | { status: 'idle' }
@@ -27,11 +27,13 @@ export type ComposerState = Readonly<{
   text: string
   /** The question the draft started under: a reply answers what the user saw while writing it. */
   bound: Readonly<{ rid: string | undefined }> | null
+  /** Counts the draft's edits; a pending write records the one it was sent from. */
+  revision: number
   status: Status
   pending: PendingWrite | null
 }>
 
-const empty: ComposerState = Object.freeze({ text: '', bound: null, status: { status: 'idle' as const }, pending: null })
+const empty: ComposerState = Object.freeze({ text: '', bound: null, revision: 0, status: { status: 'idle' as const }, pending: null })
 const states = new Map<string, ComposerState>()
 const listeners = new Set<() => void>()
 

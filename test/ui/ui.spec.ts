@@ -467,6 +467,86 @@ test('A poll that shows the thread resolved before the 201 arrives leaves Resolv
   await expect(pane.getByRole('button', { name: 'Resolve' })).toBeEnabled()
 })
 
+test('A good read of the open thread is applied even when another read in the same refresh fails', async ({ page, host }) => {
+  await host.submit({ ...agent, rid: 'work-1', kind: 'work', channel: 'work', text: 'Ship the exporter.', repo: 'example/one' })
+  await host.pass()
+  await page.clock.install()
+  await open(page, host, '#/needs-you?thread=work-1')
+  const pane = page.getByRole('complementary', { name: /Thread/ })
+  // From here on, Needs you fails while the thread itself reads fine.
+  await page.route('**/api/ui/needs-you', (route) => route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"boom"}' }))
+  await pane.getByRole('button', { name: 'Resolve' }).click()
+  await expect(pane.locator('.pane-head .badge')).toHaveText('Done')
+
+  await host.submit({ ...agent, rid: 'note-1', root: 'work-1', kind: 'note', text: 'Reopening: the build failed.' })
+  await host.pass()
+  await page.clock.runFor(15_000)
+  await expect(pane.locator('.pane-head .badge')).toHaveCount(0)
+  await expect(pane.getByRole('button', { name: 'Resolve' })).toBeEnabled()
+})
+
+test('A thread read from an older refresh that lands after a newer one is not applied', async ({ page, host }) => {
+  await host.submit({ ...agent, rid: 'work-1', kind: 'work', channel: 'work', text: 'Ship the exporter.', repo: 'example/one' })
+  await host.pass()
+  await page.clock.install()
+  await open(page, host, '#/needs-you?thread=work-1')
+  const pane = page.getByRole('complementary', { name: /Thread/ })
+  await expect(pane.getByText('No replies')).toBeVisible()
+  let release = () => {}
+  const held = new Promise<void>((resolve) => { release = resolve })
+  let fetched = () => {}
+  const stale = new Promise<void>((resolve) => { fetched = resolve })
+  let delivered: Promise<void> = Promise.resolve()
+  // The next poll reads the thread before the agent's note, and its answer arrives last.
+  await page.route('**/api/ui/thread?*', async (route) => {
+    const response = await route.fetch()
+    fetched()
+    await held
+    delivered = route.fulfill({ response })
+    await delivered
+  }, { times: 1 })
+  await page.clock.runFor(15_000)
+  await stale
+
+  await host.submit({ ...agent, rid: 'note-1', root: 'work-1', kind: 'note', text: 'Later note.' })
+  await host.pass()
+  await page.clock.runFor(15_000)
+  await expect(pane.getByText('Later note.')).toBeVisible()
+  release()
+  await held
+  await delivered
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  await expect(pane.getByText('Later note.')).toBeVisible()
+})
+
+test('Retrying an answer to an earlier question keeps a newer draft, even one with the same text', async ({ page, host }) => {
+  await host.submit({ ...agent, rid: 'work-1', kind: 'work', channel: 'work', text: 'Ship the exporter.', repo: 'example/one' })
+  await host.submit({ ...agent, rid: 'ask-1', root: 'work-1', kind: 'ask', text: 'Ship today?' })
+  await host.pass()
+  await page.clock.install()
+  await open(page, host, '#/needs-you?thread=work-1')
+  const pane = page.getByRole('complementary', { name: /Thread/ })
+  const field = pane.getByRole('textbox')
+  await page.route('**/api/ui/posts', (route) => route.abort('connectionreset'), { times: 1 })
+  await field.fill('Yes.')
+  await field.press('Enter')
+  await expect(pane.getByRole('button', { name: 'Retry' })).toBeVisible()
+
+  await host.submit({ ...agent, rid: 'ask-2', root: 'work-1', kind: 'ask', text: 'Tag it too?' })
+  await host.pass()
+  await page.clock.runFor(15_000)
+  await expect(pane.getByText('A new question arrived: “Tag it too?” Your reply is kept.')).toBeVisible()
+  // A new draft for the new question, with the same words.
+  await field.fill('')
+  await field.fill('Yes.')
+  await pane.getByRole('button', { name: 'Retry' }).click()
+  await expect(pane.getByRole('button', { name: 'Retry' })).toHaveCount(0)
+  await expect(pane.locator('.composer-hint')).toContainText('Saved to the board.')
+  await expect(field).toHaveValue('Yes.')
+  expect(host.writes).toHaveLength(1)
+  expect(JSON.parse(host.writes[0]!)).toMatchObject({ re: 'ask-1', text: 'Yes.' })
+})
+
 test('Send stays locked until the confirmed draft is cleared, even while the read after it is held', async ({ page, host }) => {
   await open(page, host, '#/global')
   let release = () => {}
