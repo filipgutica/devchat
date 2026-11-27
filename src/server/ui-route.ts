@@ -105,7 +105,8 @@ const reads: Record<string, (port: BoardPort, query: URLSearchParams) => Promise
     const candidates = await viewThreads(port, ['ask=open', 'status=blocked'])
     const answered = await viewThreads(port, ['ask=answered'])
     const answeredIds = new Set(answered.map(({ message }) => message.id))
-    const open = candidates.filter(({ message }) => !answeredIds.has(message.id))
+    // A candidate's own snapshot can say `ask=answered` too, when it was resolved before the second read.
+    const open = candidates.filter(({ message }) => message.labels.ask !== 'answered' && !answeredIds.has(message.id))
     return [200, { open, answered }]
   },
   // The project channels: every allowlisted repo a todo or work item names.
@@ -131,7 +132,9 @@ const reads: Record<string, (port: BoardPort, query: URLSearchParams) => Promise
     const parsed = rid.safeParse(query.get('rid'))
     const root = parsed.success ? await findOwn(port, `app:${parsed.data}`) : null
     if (!root || root.deleted || root.re !== null || !isViewChannel(root.channel)) return [404, { error: 'no such thread' }]
-    return [200, await readWholeThread(port, root.id)]
+    // The root can be deleted after the lookup above: check the snapshot the read returns.
+    const thread = await readWholeThread(port, root.id)
+    return thread.root.deleted ? [404, { error: 'no such thread' }] : [200, thread]
   },
 }
 

@@ -405,31 +405,76 @@ test('A deleted root leaves every list and its thread read', async (t) => {
   assert.equal((await host.call(`/api/ui/thread?rid=${gone}`)).status, 404)
 })
 
-test('A thread answered between the two Needs you reads shows only under answered', async (t) => {
-  let answer: (() => Promise<unknown>) | null = null
-  /** The read board: the user's answer lands just before the `ask=answered` read, once. */
-  const readBoard = (): Board => {
+/**
+ * A read board that runs a write once, just before its first `ask=answered` threads read or its
+ * first thread read: a change that lands between two reads of one request.
+ */
+function racingBoard() {
+  let pending: { method: 'threads' | 'thread'; run: () => Promise<unknown> } | null = null
+  const before = async (method: 'threads' | 'thread', matches: boolean) => {
+    if (pending?.method !== method || !matches) return
+    const { run } = pending
+    pending = null
+    await run()
+  }
+  const openBoard = (): Board => {
     const handle = board()
     return {
       ...handle,
       threads: (async (query: Parameters<Board['threads']>[0]) => {
-        const label = query?.label
-        if (answer && Array.isArray(label) && label.includes('ask=answered')) {
-          const run = answer
-          answer = null
-          await run()
-        }
+        await before('threads', Array.isArray(query?.label) && query.label.includes('ask=answered'))
         return handle.threads(query)
       }) as Board['threads'],
+      thread: (async (...args: Parameters<Board['thread']>) => {
+        await before('thread', true)
+        return handle.thread(...args)
+      }) as Board['thread'],
     }
   }
-  const host = await startHost(t, { readBoard })
+  return {
+    openBoard,
+    beforeAnsweredRead: (run: () => Promise<unknown>) => { pending = { method: 'threads', run } },
+    beforeThreadRead: (run: () => Promise<unknown>) => { pending = { method: 'thread', run } },
+    ran: () => pending === null,
+  }
+}
+
+/** A work item with a blocking question, through ingest. */
+async function blockedItem(host: Awaited<ReturnType<typeof startHost>>) {
   await host.submit({ ...agent, rid: 'work-1', kind: 'work', channel: 'work', text: 'Goal.' })
   await host.submit({ ...agent, rid: 'ask-1', root: 'work-1', kind: 'ask', text: 'Which port?', block: 1 })
   await host.writer.pass()
-  answer = () => host.write({ kind: 'answer', root: 'work-1', re: 'ask-1', text: '8443.' })
+}
 
-  const needsYou = (await host.call('/api/ui/needs-you')).json<{ open: Thread[]; answered: Thread[] }>()
-  assert.equal(answer, null, 'the answer ran between the reads')
-  assert.deepEqual([needsYou.open.map(({ message }) => message.labels.rid), needsYou.answered.map(({ message }) => message.labels.rid)], [[], ['work-1']])
+const needsYouRids = async (host: Awaited<ReturnType<typeof startHost>>) => {
+  const { open, answered } = (await host.call('/api/ui/needs-you')).json<{ open: Thread[]; answered: Thread[] }>()
+  return [open.map(({ message }) => message.labels.rid), answered.map(({ message }) => message.labels.rid)]
+}
+
+test('A thread answered between the two Needs you reads shows only under answered', async (t) => {
+  const race = racingBoard()
+  const host = await startHost(t, { readBoard: race.openBoard })
+  await blockedItem(host)
+  race.beforeAnsweredRead(() => host.write({ kind: 'answer', root: 'work-1', re: 'ask-1', text: '8443.' }))
+  assert.deepEqual(await needsYouRids(host), [[], ['work-1']])
+  assert.ok(race.ran(), 'the answer landed between the reads')
+})
+
+test('An answered blocked item resolved between the two Needs you reads shows in neither list', async (t) => {
+  const race = racingBoard()
+  const host = await startHost(t, { readBoard: race.openBoard })
+  await blockedItem(host)
+  await host.write({ kind: 'answer', root: 'work-1', re: 'ask-1', text: '8443.' })
+  race.beforeAnsweredRead(() => host.write({ kind: 'done', root: 'work-1' }))
+  assert.deepEqual(await needsYouRids(host), [[], []])
+  assert.ok(race.ran(), 'the resolve landed between the reads')
+})
+
+test('A root deleted between its lookup and its thread read answers 404', async (t) => {
+  const race = racingBoard()
+  const host = await startHost(t, { readBoard: race.openBoard })
+  const rid = (await host.write({ kind: 'todo', text: 'Deleted while read.' })).json().rid
+  race.beforeThreadRead(async () => host.owner.delete((await host.posted(rid)).id))
+  assert.equal((await host.call(`/api/ui/thread?rid=${rid}`)).status, 404)
+  assert.ok(race.ran(), 'the delete landed between the reads')
 })
