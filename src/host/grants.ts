@@ -5,7 +5,9 @@ type Permission = 'read' | 'post' | 'react' | 'label' | 'sync' | 'manage'
 
 /**
  * What the user's tailnet login may do (§5). The four conversation channels and `out` are
- * read-only, so the app is their only writer; `inbox` takes label-free posts.
+ * read-only, so the app is their only writer; `inbox` takes label-free posts. `sys` is read-only
+ * in release 1: a label there could change the board marker's epoch and stop every client's sync,
+ * and the machine markers that need writes arrive in release 3.
  */
 export const tailnetCan = {
   [channels.todos]: ['read'],
@@ -16,7 +18,7 @@ export const tailnetCan = {
   [channels.inbox]: ['read', 'post'],
   'guide/': ['read', 'post', 'label'],
   [channels.dream]: ['read', 'post', 'label'],
-  [channels.sys]: ['read', 'post', 'label'],
+  [channels.sys]: ['read'],
 } as const satisfies Record<string, readonly Permission[]>
 
 /**

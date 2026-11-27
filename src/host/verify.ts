@@ -27,8 +27,8 @@ export async function checkAnonymousRoute(request: BoardRequester, route: string
 }
 
 /**
- * What the tailnet login may do (§5): no post, reply, or label in the conversation channels, no
- * label in `inbox`, no grant change, and a label-free `inbox` post. Reply and label need a post to
+ * What the tailnet login may do (§5): no post, reply, or label in the conversation channels or
+ * `sys` (where the board marker is the post to probe), no label in `inbox`, no grant change, and a label-free `inbox` post. Reply and label need a post to
  * act on; in a channel with none, the check falls back to `grants explain`.
  */
 export async function checkTailnetRoute(request: BoardRequester, { route, login }: { route: string; login: string }, check: Check) {
@@ -36,7 +36,7 @@ export async function checkTailnetRoute(request: BoardRequester, { route, login 
   const principal = me.status === 200 ? z.object({ principal: z.string() }).parse(JSON.parse(me.body)).principal : `HTTP ${me.status}`
   check(`${route}: acts as the tailnet login`, principal === `tailscale:user:${login}`, principal)
 
-  for (const channel of [channels.todos, channels.work, channels.msg]) {
+  for (const channel of [channels.todos, channels.work, channels.msg, channels.sys]) {
     const post = await request('/messages', { method: 'POST', body: { channel, text: 'devchat-host verify probe' } })
     check(`${route}: post in ${channel} denied`, post.status === 403, `HTTP ${post.status}`)
     const page = await request(`/messages?channel=${channel}&limit=1`)
