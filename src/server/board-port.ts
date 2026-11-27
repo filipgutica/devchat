@@ -3,8 +3,8 @@ import type { Board, PostOptions } from '@vercel/board'
 type Post = Pick<PostOptions, 'text' | 'labels'> & { id: string }
 type MessagePageQuery = { after?: string; limit?: number }
 type ThreadsQuery = NonNullable<Parameters<Board['threads']>[0]>
-type ThreadsByLabelQuery = Pick<ThreadsQuery, 'channel' | 'before' | 'limit'>
-  & Required<Pick<ThreadsQuery, 'label'>>
+type ChannelThreadsQuery = Pick<ThreadsQuery, 'label' | 'before' | 'limit'>
+  & Required<Pick<ThreadsQuery, 'channel'>>
 
 export function createBoardPort(handle: Board) {
   return {
@@ -13,7 +13,7 @@ export function createBoardPort(handle: Board) {
     readChannel: (channel: string, query?: MessagePageQuery) => handle.channel(channel).messages(query),
     readThread: handle.thread,
     getPost: handle.posted,
-    threadsByLabel: (query: ThreadsByLabelQuery) => handle.threads(query),
+    threads: (query: ChannelThreadsQuery) => handle.threads(query),
     setLabels: handle.label,
     listSchedules: handle.schedules,
     cancelSchedule: handle.cancelSchedule,

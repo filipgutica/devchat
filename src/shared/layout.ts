@@ -39,6 +39,17 @@ export const deferredIntentKinds = ['msg', 'queue', 'ack', 'react'] as const
 // A canonical Board client ID adds the four-character app: prefix to the intent's rid. A rid is
 // also a label value and a label-query term, so it excludes `|`, which Board reads as OR.
 export const rid = z.string().max(196).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, 'A rid uses letters, digits, and . _ : -')
+/**
+ * The rids the web UI makes: `ui-` and a lowercase UUID. The app refuses an intent whose rid starts
+ * with `ui-`, ignoring case, so no agent can claim or forge a UI post's rid.
+ */
+export const uiRid = z.string().regex(/^ui-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, 'A UI rid is ui-<lowercase UUID>')
+export const isUiNamespace = (value: string) => /^ui-/i.test(value)
+// GitHub's names: an owner of 1 to 39 letters, digits, and single inner hyphens, and a repo of 1 to
+// 100 letters, digits, `.`, `_`, and `-`, other than `.` and `..`.
+const githubRepo = z.string()
+  .regex(/^(?=[^/]{1,39}\/)[A-Za-z0-9](?:-?[A-Za-z0-9])*\/[A-Za-z0-9._-]{1,100}$/, 'A repo is <owner>/<repo> as GitHub names it')
+  .refine((repo) => !/\/\.{1,2}$/.test(repo), 'A repo name is not . or ..')
 const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
 // Fields the app copies into labels must fit Board's label values: 1 to 256 characters, with no
 // control characters and no lone surrogates. The host's settings use it for the machine map too.
@@ -108,15 +119,16 @@ export const intentSchema = z.discriminatedUnion('kind', [
 export type Intent = z.infer<typeof intentSchema>
 
 /**
- * A write the user makes in the web UI, as the UI route takes it (§12). The app adds the post's
- * `rid` and `by=user`: no request sets either. A new todo or work item takes the `repo` of the
- * project channel in view, or none in #global. An answer carries `re`, the `turn` the UI showed,
- * while the root has `ask=open` (§2, DC-40).
+ * A write the user makes in the web UI, as the UI route takes it (§12). The browser makes the
+ * post's `rid` once per write, in the UI namespace, and sends the same body with it on every retry;
+ * the app adds `by=user`. A new todo or work item takes the `repo` of the project channel in view,
+ * or none in #global. An answer carries `re`, the `turn` the UI showed, while the root has
+ * `ask=open` (§2, DC-40).
  */
 export const userWriteSchema = z.discriminatedUnion('kind', [
-  z.strictObject({ kind: z.enum(['todo', 'work']), text, repo: labelValue.optional() }),
-  z.strictObject({ kind: z.literal('answer'), root: rid, re: rid.optional(), text }),
-  z.strictObject({ kind: z.literal('done'), root: rid }),
+  z.strictObject({ kind: z.enum(['todo', 'work']), rid: uiRid, text, repo: githubRepo.optional() }),
+  z.strictObject({ kind: z.literal('answer'), rid: uiRid, root: rid, re: rid.optional(), text }),
+  z.strictObject({ kind: z.literal('done'), rid: uiRid, root: rid }),
 ])
 
 export type UserWrite = z.infer<typeof userWriteSchema>

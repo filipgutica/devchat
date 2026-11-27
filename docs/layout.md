@@ -52,7 +52,7 @@ The app's state writer reads `inbox` in log order from the app marker's `applied
 | `json` | The text is not JSON. |
 | `deferred` | `kind` is `msg`, `queue`, `ack`, or `react`, which arrive in release 2. |
 | `invalid` | The intent does not match the release 1 schema: for example `kind=answer`, `by=user`, a state field such as `status`, or text or a label value Board cannot store. Also an intent whose canonical post Board refuses with a 400. |
-| `rid` | The `rid` already names another post: a different channel, parent, kind, text, or label, or a deleted post. |
+| `rid` | The `rid` already names another post: a different channel, parent, kind, text, or label, or a deleted post. Also any `rid` that starts with `ui-`, ignoring case: the UI route's namespace. |
 | `repo` | `repo` is not `<owner>/<repo>` with its owner on the host allowlist (`devchat-host install --allowlist <owner,...>`). An empty allowlist refuses every `repo`. |
 | `root` | No todo, work, or message root has the `rid` that `root` names, or that root is deleted. |
 | `profile` | A reply in `msg` comes from a profile other than `coordinator`. |
@@ -67,17 +67,19 @@ The package root exports these reasons as `refusalReasons`.
 
 ## UI route
 
-The web UI writes only through the app, under `/api/ui/` on the devchat origin. The app answers a request only when `Host` is the configured `<host>:<https port>` and `Tailscale-User-Login` is the configured login. A write is `POST /api/ui/posts` with `Sec-Fetch-Site: same-origin`, the devchat `Origin`, and a JSON body. The package root exports its schema as `userWriteSchema`:
+The web UI writes only through the app, under `/api/ui/` on the devchat origin. `tailscale serve` forwards the browser's `Host` unchanged, so the app answers a request only when it carries one `Host`, exactly `<host>:<https port>` (the bare `<host>` on port 443), and one `Tailscale-User-Login`, the configured login. A write is `POST /api/ui/posts` with `Sec-Fetch-Site: same-origin`, `Origin: https://` and that same authority, and a JSON body. The package root exports its schema as `userWriteSchema`. Every write carries `rid`, which the browser makes once per write: `ui-` and a lowercase UUID.
 
 | `kind` | Fields | The app writes |
 | --- | --- | --- |
-| `todo`, `work` | `text`; `repo` of the project channel in view, or none in #global | A root in `todos` or `work` with `rid`, `by=user`, and `repo` |
+| `todo`, `work` | `text`; `repo` of the project channel in view as GitHub names it (`<owner>/<repo>`), or none in #global | A root in `todos` or `work` with `rid`, `by=user`, and `repo` |
 | `answer` | `root`, a work item's `rid`; `text`; `re`, the `turn` the UI showed while the root has `ask=open` | A reply with `kind=answer` and `re` |
 | `done` | `root`, a todo's or work item's `rid` | A reply with `kind=done` and the text `Resolved.` |
 
-The app sets each post's `rid` (`ui-<uuid>`) and `by=user`; the schema refuses both fields. It runs its copy of the text guard on `text` first, and refuses every write while the guard is missing. It makes the write between ingest passes, never during one, and folds the thread before it answers with `{rid, state}`, the root's state labels. A refused write answers `refused`: `guard`, `repo` (not allowlisted), `root` (no such root for this kind), `re` (not a question in that thread), or `invalid` (Board refused the post).
+The app sets `by=user`; the schema refuses `by`, labels, and state fields. It runs its copy of the text guard on every string the body writes, `repo` included, and refuses every write while the guard is missing. It makes the write between ingest passes, never during one, and folds the thread before it answers `201` with `{rid, state}`, the root's state labels.
 
-The reads `GET /api/ui/needs-you`, `channels`, `threads?channel=todos|work[&repo=<owner>/<repo>][&resolved=1][&before=<older>]`, and `thread?rid=<root rid>` answer from `todos` and `work` only.
+A retry resends the same body with the same `rid`. When `app:<rid>` already is that post (by `by=user`, kind, channel, parent root, `re`, text, and `repo`), the app writes nothing, folds the thread again, and answers `200` with the same `{rid, state}`. So a retry after a lost answer, or after a write that stopped before its fold, posts once. The same `rid` with another body answers `409` with `refused: conflict`. Other refusals: `422` `guard`; `400` `repo` (not allowlisted), `re` (not a question in that thread), or `invalid` (Board refused the post); `404` `root` (no such root for this kind); `503` while the guard is missing.
+
+The reads `GET /api/ui/needs-you`, `channels`, `threads?channel=todos|work[&repo=<owner>/<repo>][&resolved=1][&before=<older>]`, and `thread?rid=<root rid>` answer from `todos` and `work` only. Needs you lists `ask=open` or `status=blocked` first, then `ask=answered`; a thread with `ask=answered` shows only in the second list. A root with no `status` yet counts as open. Page the open list by passing `older` back as `before` until it is null.
 
 ## Shared fixtures
 

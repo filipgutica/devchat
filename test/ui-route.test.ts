@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { request } from 'node:http'
@@ -16,7 +17,7 @@ import type { Intent } from '../src/shared/layout.ts'
 import { startBoardServer } from '../src/testing/index.ts'
 
 type Labels = Record<string, string>
-type Headers = Record<string, string | undefined>
+type Headers = Record<string, string | string[] | undefined>
 /** A UI write's answer: its post's rid and its root's state, or why it was refused. */
 type WriteBody = { rid: string; state: Labels; refused?: string }
 type Thread = { message: MessageView }
@@ -29,6 +30,8 @@ function deferred() {
 }
 
 const settings = { login: 'user@example.com', host: 'devchat.example.test', httpsPort: 8443 }
+/** A new rid in the UI namespace, as the browser makes one per write. */
+const uiRid = () => `ui-${randomUUID()}`
 /** What `tailscale serve` and a browser on the devchat page send. */
 const browser: Headers = {
   Host: 'devchat.example.test:8443',
@@ -42,7 +45,7 @@ const browser: Headers = {
  * A real `vb serve` with devchat's grants, a state writer, and the app with its UI route on
  * loopback. `openBoard` lets a test watch the writer's board calls.
  */
-async function startHost(t: TestContext, { withGuard = true, openBoard = () => board() } = {}) {
+async function startHost(t: TestContext, { withGuard = true, openBoard = () => board(), httpsPort = settings.httpsPort } = {}) {
   const server = await startBoardServer()
   t.after(server.stop)
   process.env.BOARD_URL = server.url
@@ -51,7 +54,7 @@ async function startHost(t: TestContext, { withGuard = true, openBoard = () => b
   const dir = await mkdtemp(join(tmpdir(), 'devchat-ui-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
   const writer = createStateWriter({ settings: { allowlist: ['example'], machines: {} }, stateFile: join(dir, 'app-state.json'), openBoard })
-  const app = createApp({ version: '0.0.0', ui: { settings, guard: withGuard ? guardReason : undefined, writer } })
+  const app = createApp({ version: '0.0.0', ui: { settings: { ...settings, httpsPort }, guard: withGuard ? guardReason : undefined, writer } })
   app.listen(0, '127.0.0.1')
   await once(app, 'listening')
   t.after(() => app.close())
@@ -60,7 +63,8 @@ async function startHost(t: TestContext, { withGuard = true, openBoard = () => b
 
   /** An HTTP call to the app; `node:http`, because `fetch` cannot set `Host`. */
   const call = (path: string, { method = 'GET', headers = {}, body }: { method?: string; headers?: Headers; body?: unknown } = {}) => {
-    const sent = Object.fromEntries(Object.entries({ ...browser, ...headers }).filter((entry): entry is [string, string] => entry[1] !== undefined))
+    // Raw header lines, so a test can send one header twice.
+    const sent = Object.entries({ ...browser, ...headers }).flatMap(([name, value]) => [value ?? []].flat().flatMap((one) => [name, one]))
     return new Promise<{ status: number | undefined; json: <T = WriteBody>() => T }>((resolve, reject) => {
       const req = request({ hostname: '127.0.0.1', port, path, method, headers: sent }, (res) => {
         let text = ''
@@ -70,7 +74,10 @@ async function startHost(t: TestContext, { withGuard = true, openBoard = () => b
       req.end(body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body))
     })
   }
-  const write = (body: unknown, headers: Headers = {}) => call('/api/ui/posts', { method: 'POST', body, headers })
+  /** A UI write; an object body without a `rid` gets a new one. */
+  const write = (body: unknown, headers: Headers = {}) => call('/api/ui/posts', {
+    method: 'POST', headers, body: typeof body === 'object' && body !== null && !('rid' in body) ? { rid: uiRid(), ...body } : body,
+  })
   /** An agent's intent, posted in `inbox` as the tailnet login. */
   const submit = async (intent: Intent) => {
     const response = await server.tailnet.request('/messages', { method: 'POST', body: { channel: 'inbox', text: JSON.stringify(intent), id: intent.rid } })
@@ -83,7 +90,7 @@ async function startHost(t: TestContext, { withGuard = true, openBoard = () => b
     return all
   }
   const posted = async (rid: string) => (await owner.posted(`app:${rid}`))
-  return { writer, call, write, submit, messages, posted }
+  return { owner, writer, call, write, submit, messages, posted }
 }
 
 const agent = { v: 1, by: 'laptop-claude' } as const
@@ -96,6 +103,11 @@ test('The route refuses a wrong login, a wrong Host, a cross-origin request, a n
     ['no login', host.write(todo, { 'Tailscale-User-Login': undefined }), 403],
     ['wrong Host', host.write(todo, { Host: '127.0.0.1' }), 403],
     ['Host without the HTTPS port', host.write(todo, { Host: 'devchat.example.test' }), 403],
+    ['Host with another port', host.write(todo, { Host: 'devchat.example.test:443' }), 403],
+    ['another host on the port', host.write(todo, { Host: 'other.example.test:8443' }), 403],
+    ['Host in other case', host.write(todo, { Host: 'DEVCHAT.example.test:8443' }), 403],
+    ['Host sent twice', host.write(todo, { Host: ['devchat.example.test:8443', 'devchat.example.test:8443'] }), 403],
+    ['Origin with the default port', host.write(todo, { Origin: 'https://devchat.example.test' }), 403],
     ['cross-site request', host.write(todo, { 'Sec-Fetch-Site': 'cross-site' }), 403],
     ['same-site request', host.write(todo, { 'Sec-Fetch-Site': 'same-site' }), 403],
     ['no Sec-Fetch-Site', host.write(todo, { 'Sec-Fetch-Site': undefined }), 403],
@@ -105,6 +117,13 @@ test('The route refuses a wrong login, a wrong Host, a cross-origin request, a n
     ['PUT', host.call('/api/ui/posts', { method: 'PUT', body: todo }), 405],
     ['GET', host.call('/api/ui/posts'), 405],
     ['guarded text', host.write({ kind: 'todo', text: 'api_key=<secret>' }), 422],
+    ['a credential in repo', host.write({ kind: 'todo', text: 'Review the handoff.', repo: 'example/ghp_abcdefghijklmnopqrstuvwx' }), 422],
+    ['repo not a GitHub name', host.write({ kind: 'todo', text: 'Review the handoff.', repo: 'example/api_key=x' }), 400],
+    ['repo named ..', host.write({ kind: 'todo', text: 'Review the handoff.', repo: 'example/..' }), 400],
+    ['owner over 39 characters', host.write({ kind: 'todo', text: 'Review the handoff.', repo: `${'e'.repeat(40)}/project` }), 400],
+    ['owner with an edge hyphen', host.write({ kind: 'todo', text: 'Review the handoff.', repo: 'example-/project' }), 400],
+    ['repo over 100 characters', host.write({ kind: 'todo', text: 'Review the handoff.', repo: `example/${'p'.repeat(101)}` }), 400],
+    ['rid outside the UI namespace', host.write({ ...todo, rid: 'work-9' }), 400],
     ['guarded reply text', host.write({ kind: 'answer', root: 'work-1', text: 'Check /home/someone/notes.txt' }), 422],
     ['a read with a wrong login', host.call('/api/ui/needs-you', { headers: { 'Tailscale-User-Login': 'other@example.com' } }), 403],
     ['a read with a wrong Host', host.call('/api/ui/needs-you', { headers: { Host: 'localhost' } }), 403],
@@ -113,6 +132,18 @@ test('The route refuses a wrong login, a wrong Host, a cross-origin request, a n
   assert.deepEqual([...await host.messages('todos'), ...await host.messages('work')], [])
   // The same request with the browser's headers goes through.
   assert.equal((await host.write(todo)).status, 201)
+})
+
+test('On HTTPS port 443 the route takes the bare Host and Origin, and refuses the explicit :443', async (t) => {
+  const host = await startHost(t, { httpsPort: 443 })
+  const todo = { kind: 'todo', text: 'Review the handoff.' }
+  const bare = { Host: 'devchat.example.test', Origin: 'https://devchat.example.test' }
+  assert.equal((await host.write(todo, { ...bare, Host: 'devchat.example.test:443' })).status, 403)
+  assert.equal((await host.write(todo, { ...bare, Origin: 'https://devchat.example.test:443' })).status, 403)
+  assert.equal((await host.write(todo, { ...bare, Host: 'devchat.example.test:8443' })).status, 403)
+  assert.equal((await host.write(todo)).status, 403, 'the :8443 headers of another install')
+  assert.deepEqual(await host.messages('todos'), [])
+  assert.equal((await host.write(todo, bare)).status, 201)
 })
 
 test('The route refuses every write while its guard is missing', async (t) => {
@@ -130,13 +161,13 @@ test('The route refuses every write while its guard is missing', async (t) => {
   assert.deepEqual(await host.messages('work'), before)
 })
 
-test('A UI post carries by=user and its own rid; no request field sets by, rid, or labels', async (t) => {
+test('A UI post carries by=user and the browser\'s UI rid; no request field sets by, labels, or status', async (t) => {
   // That no intent yields by=user: writer.test.ts, "Ingest: kind=answer, by=user, …".
   const host = await startHost(t)
   const root = await host.write({ kind: 'work', text: 'Ship the export.', repo: 'Example/project' })
   assert.equal(root.status, 201)
   const { rid, state } = root.json()
-  assert.match(rid, /^ui-/)
+  assert.match(rid, /^ui-[0-9a-f-]{36}$/)
   assert.deepEqual(state, { status: 'open' })
   const stored = await host.posted(rid)
   assert.equal(stored.channel, 'work')
@@ -146,7 +177,7 @@ test('A UI post carries by=user and its own rid; no request field sets by, rid, 
   assert.equal((await host.posted(todo.rid)).channel, 'todos')
   assert.deepEqual((await host.posted(todo.rid)).labels, { rid: todo.rid, by: 'user', status: 'open' })
 
-  for (const extra of [{ by: 'laptop-claude' }, { rid: 'chosen' }, { labels: { by: 'agent' } }, { status: 'done' }]) {
+  for (const extra of [{ by: 'laptop-claude' }, { rid: 'chosen' }, { rid: uiRid().toUpperCase() }, { labels: { by: 'agent' } }, { status: 'done' }]) {
     assert.equal((await host.write({ kind: 'todo', text: 'Review.', ...extra })).status, 400, JSON.stringify(extra))
   }
   assert.equal((await host.write({ kind: 'todo', text: 'Review.', repo: 'stranger/project' })).json().refused, 'repo')
@@ -172,6 +203,9 @@ test('A UI reply sets ask=answered and turn; Resolve sets status=done, and a lat
   assert.deepEqual(answer.json().state, { status: 'blocked', ask: 'answered', turn: answerRid })
   assert.deepEqual((await host.posted('work-1')).labels, answered)
   assert.deepEqual((await host.posted(answerRid)).labels, { rid: answerRid, by: 'user', kind: 'answer', re: 'ask-1' })
+  // Answering a blocking question moves the item from the first Needs you list to the second.
+  const needsYou = (await host.call('/api/ui/needs-you')).json<{ open: Thread[]; answered: Thread[] }>()
+  assert.deepEqual([needsYou.open.length, needsYou.answered.map(({ message }) => message.labels.rid)], [0, ['work-1']])
 
   const done = await host.write({ kind: 'done', root: 'work-1' })
   assert.equal(done.status, 201)
@@ -270,4 +304,67 @@ test('Writes serialize with pass(): a UI write never runs while an ingest pass i
   const runs = log.filter((tag, index) => tag !== log[index - 1])
   assert.deepEqual(runs, ['board-1', 'board-2'], 'each handle\'s calls are one run: the pass, then the UI write')
   assert.ok((await host.messages('work')).length === 1 && (await host.messages('todos')).length === 1)
+})
+
+test('A root without status is open: the open list shows it and pages to the end', async (t) => {
+  const host = await startHost(t)
+  // Roots as a crash between the post and its fold leaves them: no `status` yet.
+  const open = Array.from({ length: 105 }, (_, index) => `raw-${index}`)
+  for (const rid of open) await host.owner.post('todos', { id: `app:${rid}`, text: `Todo ${rid}.`, labels: { rid, by: 'user' } })
+  const done = (await host.write({ kind: 'todo', text: 'Resolved todo.' })).json().rid
+  await host.write({ kind: 'done', root: done })
+
+  const listed: string[] = []
+  const pages: number[] = []
+  for (let before: string | null = null; ;) {
+    const page: { threads: Thread[]; older: string | null } = (await host.call(`/api/ui/threads?channel=todos${before ? `&before=${encodeURIComponent(before)}` : ''}`))
+      .json()
+    pages.push(page.threads.length)
+    listed.push(...page.threads.map(({ message }) => message.labels.rid ?? ''))
+    if (page.older === null) break
+    before = page.older
+  }
+  assert.deepEqual(listed.sort(), [...open].sort())
+  // Every page but the last holds a full page of open threads, though a resolved one sits among them.
+  assert.ok(pages.length >= 2 && pages.slice(0, -1).every((count) => count >= 50), `pages: ${pages.join(', ')}`)
+})
+
+test('A retried UI write replays: the same rid and body answer 200 with one post; another body answers 409', async (t) => {
+  const host = await startHost(t)
+  const body = { rid: uiRid(), kind: 'todo', text: 'Review the handoff.', repo: 'example/project' }
+  const first = await host.write(body)
+  assert.equal(first.status, 201)
+  const retry = await host.write(body)
+  assert.equal(retry.status, 200)
+  assert.deepEqual(retry.json(), first.json())
+  assert.deepEqual((await host.messages('todos')).map(({ labels }) => labels.rid), [body.rid])
+
+  for (const other of [{ text: 'Another text.' }, { repo: 'example/other' }, { kind: 'work' }]) {
+    const response = await host.write({ ...body, ...other })
+    assert.deepEqual([response.status, response.json().refused], [409, 'conflict'], JSON.stringify(other))
+  }
+  const done = { rid: uiRid(), kind: 'done', root: body.rid }
+  assert.equal((await host.write(done)).status, 201)
+  assert.equal((await host.write({ ...done, kind: 'answer', text: 'Hi.' })).status, 404, 'an answer never goes under a todo')
+  assert.equal((await host.write({ rid: done.rid, kind: 'todo', text: 'Resolved.' })).status, 409)
+  assert.equal((await host.messages('todos')).length, 2)
+  assert.equal((await host.messages('work')).length, 0)
+
+  // A retry repairs a write that stopped after its post: the replay folds the thread.
+  const crashed = uiRid()
+  await host.owner.post('work', { id: `app:${crashed}`, text: 'A goal.', labels: { rid: crashed, by: 'user' } })
+  const repaired = await host.write({ rid: crashed, kind: 'work', text: 'A goal.' })
+  assert.deepEqual([repaired.status, repaired.json().state], [200, { status: 'open' }])
+  assert.equal((await host.posted(crashed)).labels.status, 'open')
+})
+
+test('Ingest refuses an intent whose rid is in the UI namespace, so no agent claims a UI rid', async (t) => {
+  const host = await startHost(t)
+  for (const rid of [uiRid(), 'UI-claimed', 'ui-x']) {
+    await host.submit({ ...agent, rid, kind: 'todo', channel: 'todos', text: 'Claimed.' })
+  }
+  await host.writer.pass()
+  assert.deepEqual((await host.messages('inbox')).filter(({ labels }) => labels.rid === undefined && !labels.applied).map(({ labels }) => labels.refused),
+    ['rid', 'rid', 'rid'])
+  assert.deepEqual(await host.messages('todos'), [])
 })

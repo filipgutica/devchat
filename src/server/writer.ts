@@ -1,10 +1,10 @@
 import { board, BoardError, type Board, type MessageView } from '@vercel/board'
-import { randomUUID } from 'node:crypto'
 import { readFile, rename, writeFile } from 'node:fs/promises'
 import { isDeepStrictEqual } from 'node:util'
 import { z } from 'zod'
 import {
-  appMarker, boardMarker, channels, deferredIntentKinds, intentSchema, type Intent, type RefusalReason, type UserWrite,
+  appMarker, boardMarker, channels, deferredIntentKinds, intentSchema, isUiNamespace, type Intent, type RefusalReason,
+  type UserWrite,
 } from '../shared/layout.ts'
 import type { Settings } from '../host/settings.ts'
 import { createBoardPort, type BoardPort } from './board-port.ts'
@@ -107,6 +107,21 @@ async function writeCanonical(write: () => Promise<MessageView>) {
 }
 
 type Labels = Record<string, string>
+/** A post as the app writes it: its channel, the root it replies to (null for a root), text, and labels. */
+type PlannedPost = { channel: string; parent: string | null; text: string; labels: Labels }
+
+/**
+ * Whether `written`, the app's post with a rid's client ID, is `post`: the same channel, parent
+ * root, text, and labels. A root's state labels change with its thread, and its `env` with the
+ * host's machine map, so neither is compared. A deleted post keeps no text or labels, so it is not.
+ */
+function isWrittenAs(written: MessageView, post: PlannedPost) {
+  const fixed = (labels: Labels) => (written.re === null
+    ? Object.fromEntries(Object.entries(labels).filter(([key]) => !isStateLabel(key) && key !== 'env'))
+    : labels)
+  return !written.deleted && written.channel === post.channel && written.re === post.parent
+    && written.text === post.text && isDeepStrictEqual(fixed(written.labels), fixed(post.labels))
+}
 
 const definedLabels = (labels: Record<string, string | undefined>): Labels =>
   Object.fromEntries(Object.entries(labels).filter((entry): entry is [string, string] => entry[1] !== undefined))
@@ -119,7 +134,7 @@ type WriterOptions = {
 }
 
 /** Why the app refuses a UI write it parsed: see `writeUser`. */
-export type UserWriteRefusal = 'repo' | 'root' | 're' | 'invalid'
+export type UserWriteRefusal = 'repo' | 'root' | 're' | 'invalid' | 'conflict'
 
 /**
  * The state writer (§2, §12): the only writer in the conversation channels. Each pass cancels
@@ -174,19 +189,10 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
     return { text, labels }
   }
 
-  /**
-   * Whether `written`, the app's post `app:<rid>`, is the canonical post of this very intent: the
-   * same parent root, text, and labels. A root's state labels change with its thread, and its `env`
-   * with the host's machine map, so neither is compared. A rid reused by another intent is not.
-   */
+  /** Whether `written`, the app's post `app:<rid>`, is the canonical post of this very intent. A rid reused by another intent is not. */
   function isReplay(intent: Intent, written: MessageView, post: { text: string; labels: Labels }, target: MessageView | null) {
-    const fixed = (labels: Labels) => (written.re === null
-      ? Object.fromEntries(Object.entries(labels).filter(([key]) => !isStateLabel(key) && key !== 'env'))
-      : labels)
-    const place = 'root' in intent
-      ? target !== null && written.re === target.id
-      : written.re === null && written.channel === intent.channel
-    return place && written.text === post.text && isDeepStrictEqual(fixed(written.labels), fixed(post.labels))
+    if (!('root' in intent)) return isWrittenAs(written, { channel: intent.channel, parent: null, ...post })
+    return target !== null && isWrittenAs(written, { channel: target.channel, parent: target.id, ...post })
   }
 
   async function writeRoot(port: BoardPort, intent: Extract<Intent, { kind: 'todo' | 'work' }>, post: { text: string; labels: Labels }) {
@@ -224,6 +230,8 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
     const parsed = intentSchema.safeParse(json)
     if (!parsed.success) return 'invalid'
     const intent = parsed.data
+    // The UI namespace: only the UI route writes posts with these rids.
+    if (isUiNamespace(intent.rid)) return 'rid'
     const post = canonicalPost(intent)
     if (typeof post === 'string') return post
     const target = 'root' in intent ? await findOwn(port, `app:${intent.root}`) : null
@@ -232,8 +240,7 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
     // No intent Board accepted fails the checks above, so they refuse nothing that was applied.
     const written = await findOwn(port, `app:${intent.rid}`)
     if (written) {
-      // A deleted post keeps no text or labels, so nothing proves it was this intent's.
-      if (written.deleted || !isReplay(intent, written, post, target)) return 'rid'
+      if (!isReplay(intent, written, post, target)) return 'rid'
       await foldThread(port, written.re ?? written.id)
       return null
     }
@@ -278,43 +285,53 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
     await writeAppState(stateFile, { epoch, folded })
   }
 
-  type UserWriteResult = { rid: string; state: Labels } | { refused: UserWriteRefusal }
+  type UserWriteResult = { rid: string; state: Labels; replayed: boolean } | { refused: UserWriteRefusal }
 
-  /** A new todo or work item, in the channel of its kind. */
-  async function writeUserRoot(port: BoardPort, rid: string, write: Extract<UserWrite, { kind: 'todo' | 'work' }>): Promise<UserWriteResult> {
-    if (write.repo !== undefined && !isAllowlisted(write.repo, settings.allowlist)) return { refused: 'repo' }
-    const channel = write.kind === 'todo' ? channels.todos : channels.work
-    const labels = definedLabels({ rid, by: 'user', repo: write.repo })
-    const root = await writeCanonical(() => port.post(channel, { id: `app:${rid}`, text: write.text, labels }))
-    return root ? { rid, state: await foldThread(port, root.id) } : { refused: 'invalid' }
-  }
-
-  /** An answer under a work item, or a resolve under a todo or work item. */
-  async function writeUserReply(port: BoardPort, rid: string, write: Extract<UserWrite, { root: string }>): Promise<UserWriteResult> {
+  /** The post a UI write stands for, or `root` when it names no root it may go under. */
+  async function plannedUserPost(port: BoardPort, write: UserWrite): Promise<PlannedPost | 'root'> {
+    if (!('root' in write)) {
+      const channel = write.kind === 'todo' ? channels.todos : channels.work
+      return { channel, parent: null, text: write.text, labels: definedLabels({ rid: write.rid, by: 'user', repo: write.repo }) }
+    }
+    // An answer goes under a work item; a resolve under a todo or work item.
     const target = await findOwn(port, `app:${write.root}`)
     const targetChannels: readonly string[] = write.kind === 'answer' ? [channels.work] : [channels.todos, channels.work]
-    if (!target || target.deleted || target.re !== null || !targetChannels.includes(target.channel)) return { refused: 'root' }
+    if (!target || target.deleted || target.re !== null || !targetChannels.includes(target.channel)) return 'root'
     const re = write.kind === 'answer' ? write.re : undefined
-    if (re !== undefined) {
-      const question = await findOwn(port, `app:${re}`)
-      if (question?.re !== target.id || question.labels.kind !== 'ask') return { refused: 're' }
-    }
-    const labels = definedLabels({ rid, by: 'user', kind: write.kind, re })
     const text = write.kind === 'done' ? 'Resolved.' : write.text
-    const reply = await writeCanonical(() => port.reply(target.id, { id: `app:${rid}`, text, labels }))
-    return reply ? { rid, state: await foldThread(port, target.id) } : { refused: 'invalid' }
+    return { channel: target.channel, parent: target.id, text, labels: definedLabels({ rid: write.rid, by: 'user', kind: write.kind, re }) }
+  }
+
+  /** Why a new UI write is refused: `repo` off the allowlist, or `re` not a question in its thread. */
+  async function checkNewUserPost(port: BoardPort, write: UserWrite, post: PlannedPost): Promise<UserWriteRefusal | null> {
+    if ('repo' in write && write.repo !== undefined && !isAllowlisted(write.repo, settings.allowlist)) return 'repo'
+    if (post.labels.re === undefined) return null
+    const question = await findOwn(port, `app:${post.labels.re}`)
+    return question?.re === post.parent && question.labels.kind === 'ask' ? null : 're'
   }
 
   /**
-   * Writes the user's post with `by=user` and its own `rid`, then folds its thread (§2, §12). Returns
-   * the post's `rid` and its root's folded state, or why it is refused: `repo` off the allowlist,
-   * `root` not a root the write may go under, `re` not a question in that thread, or `invalid` when
-   * Board refuses the post.
+   * Writes the user's post with `by=user` and the browser's `rid`, then folds its thread (§2, §12),
+   * and returns the root's folded state. A retry replays: when `app:<rid>` already is this post, the
+   * app writes nothing, folds its thread again, and answers `replayed`. Refused: `root`, `repo`,
+   * `re` (see above), `conflict` when the rid holds another post, or `invalid` when Board refuses it.
    */
-  function writeUserPost(write: UserWrite) {
+  async function writeUserPost(write: UserWrite): Promise<UserWriteResult> {
     const port = createBoardPort(openBoard())
-    const rid = `ui-${randomUUID()}`
-    return 'root' in write ? writeUserReply(port, rid, write) : writeUserRoot(port, rid, write)
+    const post = await plannedUserPost(port, write)
+    if (post === 'root') return { refused: 'root' }
+    const id = `app:${write.rid}`
+    const written = await findOwn(port, id)
+    if (written) {
+      if (!isWrittenAs(written, post)) return { refused: 'conflict' }
+      return { rid: write.rid, state: await foldThread(port, written.re ?? written.id), replayed: true }
+    }
+    const refused = await checkNewUserPost(port, write, post)
+    if (refused) return { refused }
+    const { channel, parent, ...content } = post
+    const message = await writeCanonical(() => (parent ? port.reply(parent, { id, ...content }) : port.post(channel, { id, ...content })))
+    if (!message) return { refused: 'invalid' }
+    return { rid: write.rid, state: await foldThread(port, parent ?? message.id), replayed: false }
   }
 
   return {
