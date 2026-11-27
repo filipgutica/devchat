@@ -52,4 +52,4 @@ A resolve clears `ask` and `turn` and sets `status` to `done` or `dropped`. The 
 
 Import `createMemoryBoard` or `startBoardServer` from `@filipgutica/devchat/testing`. Call `close()` on the memory board or `stop()` on the server after each test. The server generates an owner token in its temporary config directory and provides a loopback HTTP client with a fake tailnet login.
 
-Use Node 24 for Board integration tests, as CI does. Board 0.56.1 fails to write posts on the tested Node 22.18.0 and 22.19.0 releases because their SQLite binding rejects its numbered parameters. The Board integration tests pass on Node 22.20.0.
+Use Node 24 for Board integration tests, as CI does. The package requires Node 22.20 or later: Board 0.56.1 fails to write posts on the tested Node 22.18.0 and 22.19.0 releases because their SQLite binding rejects its numbered parameters. The Board integration tests pass on Node 22.20.0.
