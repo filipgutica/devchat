@@ -101,7 +101,7 @@ export function ChannelView({ view, threads, offline, onSaved, ...shared }: Chan
         <TabsPanel value="work">{list('work')}</TabsPanel>
       </div>
       <div className="view-foot">
-        <Composer key={`${name}:${view.tab}`} label={`New ${noun} in ${name}`} hint="Saved to the board." offline={offline} write={create} onSend={onCreate} />
+        <Composer key={`${name}:${view.tab}`} label={`New ${noun} in ${name}`} offline={offline} write={create} onSend={onCreate} />
       </div>
     </Tabs>
   )

@@ -1,6 +1,9 @@
-import type { ReactNode } from 'react'
+import { createContext, useContext, type ReactNode } from 'react'
 import { Icon } from './icons.tsx'
 import { authorName, clock, dayLabel, initials, isAgent, when } from './format.ts'
+
+/** Every author name on screen, so two profiles never share an avatar's initials. */
+export const AuthorsInView = createContext<readonly string[]>([])
 
 /** The Needs you tag, or the resolution note, in a message row's header (components.md, Message row). */
 export type RowStatus =
@@ -32,11 +35,12 @@ type RowProps = {
 export function MessageRow({ by, at, cont = false, current = false, status, children }: RowProps) {
   const name = authorName(by)
   const agent = isAgent(by)
+  const inView = useContext(AuthorsInView)
   return (
     <li className={cont ? 'msg cont' : 'msg'} aria-current={current ? 'true' : undefined}>
       {cont
         ? <span className="gutter" aria-hidden="true">{clock(at)}</span>
-        : <span className="avatar" aria-hidden="true">{initials(name)}</span>}
+        : <span className="avatar" aria-hidden="true">{initials(name, inView)}</span>}
       <div>
         {cont ? <span className="sr-only">{name}, {when(at)}</span> : (
           <div className="msg-head">

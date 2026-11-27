@@ -1,8 +1,9 @@
 import { Input } from '@ui-sdk/react/input'
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
 import { read, readChannel, readThread, Unreachable, type NeedsYou, type Thread, type ThreadSummary } from './api.ts'
-import { channelName, clock } from './format.ts'
+import { authorName, byOf, channelName, clock } from './format.ts'
 import { Icon, IconSprite } from './icons.tsx'
+import { AuthorsInView } from './message.tsx'
 import { parseRoute, routeHref, type Route, type View } from './route.ts'
 import { ThreadPane } from './thread-pane.tsx'
 import { ChannelView, NeedsYouView, SearchView } from './views.tsx'
@@ -39,7 +40,12 @@ export function App() {
   const routeRef = useRef(route)
   routeRef.current = route
   const latest = useRef(0)
-  const opener = useRef<HTMLElement | null>(null)
+  /**
+   * The thread link that opened the pane, the page's scroll then, and whether the list was in view:
+   * closing the thread goes back to that list, as the browser's Back button does.
+   */
+  const opener = useRef<{ link: HTMLElement; scrollY: number; fromList: boolean } | null>(null)
+  const shownThread = useRef(route.thread)
 
   const refresh = useCallback(async () => {
     const asked = routeRef.current
@@ -102,20 +108,29 @@ export function App() {
   }, [refresh])
 
   function closeThread() {
-    location.hash = routeHref({ view: route.view, thread: null })
-    // Closing returns focus to what opened the thread, or to the view's heading.
-    requestAnimationFrame(() => {
-      const back = opener.current?.isConnected ? opener.current : document.querySelector<HTMLElement>('main h1')
-      back?.focus()
-      opener.current = null
-    })
+    // A thread opened from the list closes as Back does, so the browser's history keeps one entry for it.
+    if (opener.current?.fromList) history.back()
+    else location.hash = routeHref({ view: route.view, thread: null })
   }
 
-  // Remember the link that opened a thread, so closing it can return focus there.
+  // When the thread closes, by Close, Back, or the browser's Back button, the list returns where it
+  // was: the page's scroll position (on a phone the thread replaces the list) and focus on the opener.
+  useLayoutEffect(() => {
+    const was = shownThread.current
+    shownThread.current = route.thread
+    if (!was || route.thread) return
+    const back = opener.current
+    opener.current = null
+    if (back) window.scrollTo(0, back.scrollY)
+    const target = back?.link.isConnected ? back.link : document.getElementById('main')
+    target?.focus({ preventScroll: Boolean(back) })
+  }, [route.thread])
+
+  // Remember the link that opened a thread, so closing it can return there.
   useEffect(() => {
     const onClick = (event: MouseEvent) => {
       const link = event.target instanceof Element ? event.target.closest('a[href*="thread="]') : null
-      if (link instanceof HTMLElement) opener.current = link
+      if (link instanceof HTMLElement) opener.current = { link, scrollY: window.scrollY, fromList: !routeRef.current.thread }
     }
     document.addEventListener('click', onClick)
     return () => document.removeEventListener('click', onClick)
@@ -133,47 +148,52 @@ export function App() {
   const channelRoute = (repo: string | null): Route => ({ view: { kind: 'channel', repo, tab: view.kind === 'channel' ? view.tab : 'todos', resolved: false }, thread: null })
   const isChannel = (repo: string | null) => view.kind === 'channel' && view.repo === repo
   const waiting = needsYou?.open.length ?? 0
+  const summaries = [...(needsYou?.open ?? []), ...(needsYou?.answered ?? []), ...(threads ?? [])]
+  const posts = [...summaries.flatMap(({ message, last }) => (last ? [message, last] : [message])), ...(thread ? [thread.value?.root, ...(thread.value?.replies ?? [])] : [])]
+  const authors = [...new Set(posts.flatMap((post) => (post ? [authorName(byOf(post))] : [])))]
 
   return (
     <>
       <IconSprite />
       <a className="skip" href="#main" onClick={(event) => { event.preventDefault(); document.getElementById('main')?.focus() }}>Skip to content</a>
-      <div className={route.thread ? 'shell has-thread' : 'shell'}>
-        <aside className="sidebar" aria-label="devchat">
-          <p className="app-name">devchat</p>
-          <form role="search" className="search" onSubmit={onSearch}>
-            <Icon name="search" />
-            <Input type="search" data-size="sm" aria-label="Search todos and work" placeholder="Search" value={query} onChange={(event) => setQuery(event.target.value)} />
-          </form>
-          <nav className="navlist" aria-label="Views">
-            <a href={routeHref({ view: { kind: 'needs-you' }, thread: null })} aria-current={view.kind === 'needs-you' ? 'page' : undefined}>
-              Needs you{waiting > 0 && <span className="count">{waiting}</span>}
-            </a>
-          </nav>
-          <nav className="navlist" aria-label="Channels">
-            <span className="group-label">Channels</span>
-            {[null, ...repos].map((repo) => (
-              <a key={repo ?? '#global'} href={routeHref(channelRoute(repo))} aria-current={isChannel(repo) ? 'page' : undefined}>{channelName(repo, repos)}</a>
-            ))}
-          </nav>
-        </aside>
-        <main id="main" tabIndex={-1}>
-          {offline && (
-            <div className="alert warning" role="status">
-              <Icon name="alert" />
-              <p>Offline: devchat can't be reached. {loadedAt ? `Showing what loaded at ${clock(loadedAt)}. ` : ''}It checks again every 15 seconds.</p>
-            </div>
+      <AuthorsInView.Provider value={authors}>
+        <div className={route.thread ? 'shell has-thread' : 'shell'}>
+          <aside className="sidebar" aria-label="devchat">
+            <p className="app-name">devchat</p>
+            <form role="search" className="search" onSubmit={onSearch}>
+              <Icon name="search" />
+              <Input type="search" data-size="sm" aria-label="Search todos and work" placeholder="Search" value={query} onChange={(event) => setQuery(event.target.value)} />
+            </form>
+            <nav className="navlist" aria-label="Views">
+              <a href={routeHref({ view: { kind: 'needs-you' }, thread: null })} aria-current={view.kind === 'needs-you' ? 'page' : undefined}>
+                Needs you{waiting > 0 && <span className="count">{waiting}</span>}
+              </a>
+            </nav>
+            <nav className="navlist" aria-label="Channels">
+              <span className="group-label">Channels</span>
+              {[null, ...repos].map((repo) => (
+                <a key={repo ?? '#global'} href={routeHref(channelRoute(repo))} aria-current={isChannel(repo) ? 'page' : undefined}>{channelName(repo, repos)}</a>
+              ))}
+            </nav>
+          </aside>
+          <main id="main" tabIndex={-1}>
+            {offline && (
+              <div className="alert warning" role="status">
+                <Icon name="alert" />
+                <p>Offline: devchat can't be reached. {loadedAt ? `Showing what loaded at ${clock(loadedAt)}. ` : ''}It checks again every 15 seconds.</p>
+              </div>
+            )}
+            {readError && !offline && <div className="alert danger" role="alert"><Icon name="alert" /><p>{readError}</p></div>}
+            {view.kind === 'needs-you' && <NeedsYouView {...shared} data={needsYou} />}
+            {view.kind === 'channel' && <ChannelView {...shared} view={view} threads={threads} offline={offline} onSaved={onSaved} />}
+            {view.kind === 'search' && <SearchView {...shared} q={view.q} threads={threads} />}
+          </main>
+          {route.thread && (
+            <ThreadPane key={route.thread} rid={route.thread} repos={repos} offline={offline} onClose={closeThread} onSaved={onSaved}
+              thread={thread?.rid === route.thread ? thread.value : undefined} />
           )}
-          {readError && !offline && <div className="alert danger" role="alert"><Icon name="alert" /><p>{readError}</p></div>}
-          {view.kind === 'needs-you' && <NeedsYouView {...shared} data={needsYou} />}
-          {view.kind === 'channel' && <ChannelView {...shared} view={view} threads={threads} offline={offline} onSaved={onSaved} />}
-          {view.kind === 'search' && <SearchView {...shared} q={view.q} threads={threads} />}
-        </main>
-        {route.thread && (
-          <ThreadPane key={route.thread} rid={route.thread} repos={repos} offline={offline} onClose={closeThread} onSaved={onSaved}
-            thread={thread?.rid === route.thread ? thread.value : undefined} />
-        )}
-      </div>
+        </div>
+      </AuthorsInView.Provider>
       <p className="sr-only" role="status">{announcement}</p>
     </>
   )

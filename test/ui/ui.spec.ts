@@ -30,7 +30,7 @@ test('Needs you lists open and blocked questions first, then the threads the use
   await page.getByRole('link', { name: 'Fix the docs build.' }).click()
   await composer(page, 'Answer laptop-claude').fill('Yes, keep it.')
   await composer(page, 'Answer laptop-claude').press('Enter')
-  await expect(page.getByText('Waiting for the agent. Replies are saved to the board.')).toBeVisible()
+  await expect(page.getByText('Saved to the board. Waiting for the agent.')).toBeVisible()
 
   await expect(rows(page, 'Needs you')).toHaveCount(2)
   await expect(rows(page, 'Needs you').nth(0)).toContainText('Which port should it use?')
@@ -76,6 +76,9 @@ test('The composer adds a todo or a work item to the channel in view, saved by t
   await host.submit({ ...agent, rid: 'todo-1', kind: 'todo', channel: 'todos', text: 'Makes the channel.', repo: 'example/one' })
   await host.pass()
   await open(page, host, '#/repo/example/one')
+  // "Saved to the board" belongs to a write that happened: none before, and gone once the user types again.
+  const saved = page.locator('.composer-hint', { hasText: 'Saved to the board.' })
+  await expect(saved).toHaveCount(0)
 
   await composer(page, 'New todo in #one').fill('Check the release notes.')
   await composer(page, 'New todo in #one').press('Enter')
@@ -83,6 +86,11 @@ test('The composer adds a todo or a work item to the channel in view, saved by t
   await expect(composer(page, 'New todo in #one')).toHaveValue('')
   await expect(composer(page, 'New todo in #one')).toBeFocused()
   await expect(page.getByRole('status').filter({ hasText: 'Saved to the board' })).toBeAttached()
+  await expect(saved).toBeVisible()
+  await expect(composer(page, 'New todo in #one')).toHaveAttribute('aria-describedby', await saved.getAttribute('id') ?? '')
+  await composer(page, 'New todo in #one').pressSequentially('N')
+  await expect(saved).toHaveCount(0)
+  await composer(page, 'New todo in #one').fill('')
 
   await page.getByRole('tab', { name: 'Work' }).click()
   await composer(page, 'New work item in #one').fill('Cut release 0.2.')
@@ -118,7 +126,7 @@ test('An answer goes under the work item with re set to the question the pane sh
   await composer(page, 'Answer desktop-codex').press('Enter')
   await expect(rows(page, 'Replies')).toHaveCount(2)
   await expect(pane.locator('.pane-head .badge')).toHaveCount(0)
-  await expect(pane.getByText('Waiting for the agent. Replies are saved to the board.')).toBeVisible()
+  await expect(pane.getByText('Saved to the board. Waiting for the agent.')).toBeVisible()
 
   const answer = (await posts(host, 'work')).find((post) => post.text === 'Use 8443.')
   expect(answer?.labels).toMatchObject({ by: 'user', kind: 'answer', re: 'ask-1' })
@@ -265,4 +273,36 @@ test('The page polls every 15 s; offline it says so, keeps what it shows, and di
   await page.clock.runFor(15_000)
   await expect(page.getByText("Offline: devchat can't be reached.", { exact: false })).toHaveCount(0)
   await expect(composer(page, 'New todo in #global')).toBeEnabled()
+})
+
+test('On a phone the thread replaces the list; Back, or the browser\'s Back, returns to the list and its opener', async ({ page, host }) => {
+  for (let n = 1; n <= 12; n++) {
+    await host.submit({ ...agent, rid: `work-${n}`, kind: 'work', channel: 'work', text: `Work item ${n}.`, repo: 'example/one' })
+  }
+  await host.pass()
+  await page.setViewportSize({ width: 390, height: 844 })
+  await open(page, host, '#/repo/example/one?tab=work')
+  const list = page.getByRole('list', { name: 'Open work items in #one', exact: true })
+  const opener = list.locator('li.msg').filter({ hasText: 'Work item 12.' }).getByRole('link', { name: 'Open thread' })
+  await expect(opener).toBeVisible()
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight))
+  const scrolled = await page.evaluate(() => window.scrollY)
+  expect(scrolled).toBeGreaterThan(0)
+
+  for (const back of ['button', 'browser'] as const) {
+    await opener.click()
+    const pane = page.getByRole('complementary', { name: /Thread/ })
+    await expect(pane.getByRole('heading', { name: /Thread/ })).toBeFocused()
+    await expect(list).toBeHidden()
+    await expect(page.getByRole('textbox', { name: 'New work item in #one' })).toBeHidden()
+    await expect(pane.getByRole('button', { name: 'Close thread' })).toBeHidden()
+    if (back === 'button') await pane.getByRole('button', { name: 'Back' }).click()
+    else await page.goBack()
+    await expect(pane).toHaveCount(0)
+    await expect(list).toBeVisible()
+    await expect(opener).toBeFocused()
+    expect(await page.evaluate(() => window.scrollY), back).toBe(scrolled)
+  }
+  // Back took the history entry the thread made, so one more Back leaves this view.
+  expect(page.url()).toContain('#/repo/example/one?tab=work')
 })

@@ -6,8 +6,8 @@ import type { WriteState } from './use-write.ts'
 type ComposerProps = {
   /** Names the field for where the text goes, such as "New todo in #global". */
   label: string
-  /** Says what happens after sending. */
-  hint: string
+  /** What the reader should know before sending, such as "Waiting for the agent."; none by default. */
+  hint?: string
   offline: boolean
   write: { state: WriteState; retry: () => Promise<boolean> }
   /** Sends the text; resolves true once the board has it. */
@@ -24,9 +24,12 @@ const offlineHint = "Offline: devchat can't be reached. Sending comes back when 
 export function Composer({ label, hint, offline, write, onSend }: ComposerProps) {
   const id = useId()
   const [text, setText] = useState('')
+  /** Set after the board confirms this composer's write, and cleared once the user types again (§12). */
+  const [saved, setSaved] = useState(false)
   const field = useRef<HTMLTextAreaElement>(null)
   const busy = write.state.status === 'busy'
   const error = write.state.status === 'error' ? write.state : null
+  const shownHint = offline ? offlineHint : [saved && 'Saved to the board.', hint].filter(Boolean).join(' ')
 
   /** The text of the last send, which Retry resends whatever the field holds now. */
   const sent = useRef('')
@@ -34,13 +37,19 @@ export function Composer({ label, hint, offline, write, onSend }: ComposerProps)
   async function send() {
     if (busy || offline || text.trim() === '') return
     sent.current = text
-    if (await onSend(text)) setText('')
+    if (await onSend(text)) {
+      setText('')
+      setSaved(true)
+    }
     field.current?.focus()
   }
 
   async function retry() {
     // Clear the field only if it still holds what was sent: an edit made since stays.
-    if (await write.retry()) setText((current) => (current === sent.current ? '' : current))
+    if (await write.retry()) {
+      setText((current) => (current === sent.current ? '' : current))
+      setSaved(true)
+    }
     field.current?.focus()
   }
 
@@ -62,10 +71,13 @@ export function Composer({ label, hint, offline, write, onSend }: ComposerProps)
           value={text}
           readOnly={busy}
           disabled={offline}
-          aria-describedby={`${id}-hint`}
+          aria-describedby={shownHint ? `${id}-hint` : undefined}
           aria-invalid={error ? 'true' : undefined}
           aria-errormessage={error ? `${id}-error` : undefined}
-          onChange={(event) => setText(event.target.value)}
+          onChange={(event) => {
+            setText(event.target.value)
+            setSaved(false)
+          }}
           onKeyDown={onKeyDown}
         />
         <Button data-size="sm" data-icon-only aria-label="Send" aria-busy={busy ? 'true' : undefined} disabled={offline || busy} onClick={() => void send()}>
@@ -78,7 +90,7 @@ export function Composer({ label, hint, offline, write, onSend }: ComposerProps)
           {error.retry && <Button data-variant="text" data-size="sm" disabled={offline || busy} onClick={() => void retry()}>Retry</Button>}
         </div>
       )}
-      <p className="composer-hint" id={`${id}-hint`}>{offline ? offlineHint : hint}</p>
+      {shownHint && <p className="composer-hint" id={`${id}-hint`}>{shownHint}</p>}
     </div>
   )
 }

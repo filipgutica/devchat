@@ -84,10 +84,8 @@ function composerWording({ root, replies }: Thread) {
   const { ask, status } = root.labels
   const lastAgent = [root, ...replies].reverse().find((post) => byOf(post) !== 'user')
   const label = !lastAgent ? 'Reply in this thread' : ask === 'open' ? `Answer ${byOf(lastAgent)}` : `Reply to ${byOf(lastAgent)}`
-  const hint = isResolved(status) ? 'A reply reopens the thread. Saved to the board.'
-    : ask === 'answered' ? 'Waiting for the agent. Replies are saved to the board.'
-    : 'Saved to the board.'
-  return { label, hint }
+  const hint = isResolved(status) ? 'A reply reopens the thread.' : ask === 'answered' ? 'Waiting for the agent.' : undefined
+  return { label, ...(hint ? { hint } : {}) }
 }
 
 /**
@@ -128,6 +126,8 @@ export function ThreadPane({ rid, thread, repos, offline, onClose, onSaved }: Th
     <aside className="thread-pane" id="thread-pane" aria-labelledby={headingId} style={{ width: `${width}rem` }}>
       <PaneResize width={width} onWidth={setWidth} />
       <div className="pane-head">
+        {/* On a phone the thread replaces the list, so Back takes the place of Close. */}
+        <Button className="pane-back" data-variant="ghost" data-size="sm" onClick={onClose}>Back</Button>
         <h4 id={headingId} ref={heading} tabIndex={-1}>
           Thread <span>{root ? `${channelName(labels.repo, repos)} · ${root.channel === 'work' ? 'Work item' : 'Todo'}` : ''}</span>
         </h4>
@@ -138,7 +138,7 @@ export function ThreadPane({ rid, thread, repos, offline, onClose, onSaved }: Th
             Resolve
           </Button>
         )}
-        <Button data-variant="ghost" data-size="sm" data-icon-only aria-label="Close thread" onClick={onClose}>
+        <Button className="pane-close" data-variant="ghost" data-size="sm" data-icon-only aria-label="Close thread" onClick={onClose}>
           <Icon name="close" />
         </Button>
       </div>

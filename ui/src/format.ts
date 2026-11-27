@@ -26,8 +26,19 @@ export const authorName = (by: string) => (by === 'user' ? 'You' : by)
 export const isAgent = (by: string) => by !== 'user'
 export const byOf = (message: Message) => message.labels.by ?? 'unknown'
 
-/** Up to two initials: "desktop-claude" gives "DC", and "You" gives "Y". */
-export const initials = (name: string) => name.split(/[^A-Za-z0-9]+/).filter(Boolean).slice(0, 2).map((part) => part[0]!.toUpperCase()).join('')
+const nameParts = (name: string) => name.split(/[^A-Za-z0-9]+/).filter(Boolean)
+const firstLetters = (name: string) => nameParts(name).slice(0, 2).map((part) => part[0]!.toUpperCase()).join('')
+
+/**
+ * An avatar's initials: the first letter of each of the first two parts, so "laptop-claude" gives
+ * "LC" and "You" gives "Y". When another name in view gives the same letters, as "desktop-claude"
+ * and "desktop-codex" do, each takes the first two characters of its last part: "CL" and "CO".
+ */
+export function initials(name: string, inView: readonly string[]) {
+  const letters = firstLetters(name)
+  const clash = inView.some((other) => other !== name && firstLetters(other) === letters)
+  return clash ? (nameParts(name).at(-1) ?? name).slice(0, 2).toUpperCase() : letters
+}
 
 /**
  * A channel's name: `#global`, or `#<repo>` for a project channel, with its owner when another

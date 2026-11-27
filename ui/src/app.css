@@ -60,6 +60,12 @@ main > .alert { margin: var(--space-3) var(--space-6) 0; }
 .thread-pane > .composer { padding-top: var(--space-2); }
 .pane-body > .alert { margin-bottom: var(--space-3); }
 
+/* Focus moves to the thread's heading when it opens, so a screen reader starts there. The heading is not a
+   control, so it draws no ring; the ring stays on what the keyboard can reach. */
+.pane-head h4:focus { outline: none; }
+/* Back replaces Close on a phone, where the thread replaces the list. */
+.pane-back { display: none; }
+
 @media (max-width: 800px) {
   /* One column: the sidebar becomes a top bar whose lists scroll sideways, and the thread pane sits
      below the channel at full width (components.md, Thread panel). The page scrolls as a whole. */
@@ -78,4 +84,10 @@ main > .alert { margin: var(--space-3) var(--space-6) 0; }
   .sidebar, .toolbar, .view-foot { padding-inline: var(--space-4); }
   main > .alert { margin-inline: var(--space-4); }
   .view-body { padding-inline: var(--space-2); }
+  .shell.has-thread > :is(.sidebar, main) { display: none; }
+  .thread-pane { border-top: 0; }
+  .pane-back { display: inline-flex; }
+  .pane-close { display: none; }
+  /* Back and the title share the first row; the state badge and Resolve wrap below them. */
+  .pane-head h4 { flex-basis: 0; }
 }

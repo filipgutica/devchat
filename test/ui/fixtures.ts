@@ -38,5 +38,6 @@ export const agent = { v: 1, by: 'laptop-claude' } as const
 /** Opens the UI at a hash route and waits for its first read. */
 export async function open(page: Page, host: UiHost, hash = '#/needs-you') {
   await page.goto(`${host.url}${hash}`)
-  await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+  // On a phone an open thread replaces the view, so its heading stands in for the view's.
+  await expect(page.getByRole('heading', { level: 1 }).or(page.getByRole('heading', { name: /^Thread/ })).filter({ visible: true }).first()).toBeVisible()
 }

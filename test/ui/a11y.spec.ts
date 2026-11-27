@@ -28,6 +28,10 @@ test('The keyboard reaches every control in order, each with a visible focus rin
   await host.seed()
   await open(page, host, '#/repo/example/devchat?tab=work&thread=seed-work-1')
   await expect(page.getByText('Should the composer keep a draft').first()).toBeVisible()
+  // desktop-claude and desktop-codex would both be "DC": each takes its last part's first two letters.
+  const avatar = (author: string) => page.locator('main li.msg', { has: page.locator('.author', { hasText: author }) }).locator('.avatar')
+  await expect(avatar('desktop-claude')).toHaveText('CL')
+  await expect(avatar('desktop-codex')).toHaveText('CO')
   await page.locator('body').focus()
   const reached: string[] = []
   for (let step = 0; step < 40; step++) {
