@@ -3,6 +3,9 @@
   "version": "0.0.0-development",
   "description": "Shared contracts and server tooling for the devchat board",
   "type": "module",
+  "bin": {
+    "devchat-host": "./dist/host/cli.js"
+  },
   "files": ["dist", "fixtures", "docs/layout.md", "README.md"],
   "exports": {
     ".": {
