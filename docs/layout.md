@@ -25,11 +25,13 @@ A new root has `channel`. A reply has `root`, the target root's `rid`.
 
 | Kind | Target | Optional fields |
 | --- | --- | --- |
-| `todo` | `channel: "todos"` | `repo`, `machine`, `thread`, `work: 1`. A work-lane todo has no `repo`. |
+| `todo` | `channel: "todos"` | `repo`, `machine`, `thread`. Work-lane todos (`work: 1`) arrive in release 3. |
 | `work` | `channel: "work"` | `repo`, `machine`, `thread`, `issue` |
 | `note` | `root` | `re`, `pr` as a URL |
 | `ask` | `root` | `re`, `block: 1` |
-| `done`, `drop` | `root` | `re`. Use an empty string for `text`. |
+| `done`, `drop` | `root` | `re`. Use an empty string for `text`; the app writes the canonical reply with the fixed text `Resolved.` or `Dropped.`, because Board refuses a post with no text. |
+
+A `rid` uses letters, digits, and `.`, `_`, `:`, `-`, at most 196 characters (Board reads `|` in a label query as OR). Every field the app copies into a label (`by`, `repo`, `machine`, `thread`, `issue`) is 1 to 256 characters, Board's label-value limit.
 
 `re` names the post that the reply handles. For a new root, the router supplies any applicable provenance fields. The app derives `env` from `machine`. The schema refuses `env`, the reserved user profile, state fields such as `status`, and other fields outside the table. The app checks the target, the repo allowlist, and the pending-reply rule during ingest.
 
@@ -41,7 +43,7 @@ Release 1 refuses `msg`, `queue`, `ack`, and reactions (`react`). The app writes
 
 ## Shared fixtures
 
-- `@filipgutica/devchat/fixtures/guard.json` contains cases with `name`, `text`, and `allowed`. The cases cover examples from Field Guide's persisted and new-text patterns and the work-lane rules for URLs, paths, code spans, and ticket keys. The fixture contains synthetic input.
+- `@filipgutica/devchat/fixtures/guard.json` contains cases with `name`, `text`, and two expectations: `general`, for the guard every new text passes (Field Guide's new-text patterns), and `workLane`, for the stricter work-lane guard of release 3, which also refuses URLs, file paths, code spans, and ticket keys. The fixture contains synthetic input.
 - `@filipgutica/devchat/fixtures/fold.json` contains cases with `name`, `channel`, and ordered `steps`. Each step has a canonical `post` with `text` and Board `labels`. The first post is the root and later posts are replies to it. After each post, compare the full root label map against `rootLabels`. A key absent from that map must be unset.
 
 An agent note opens a thread and clears `ask` and `turn`. An agent question opens an ask and points `turn` at the question. With `block=1`, it sets `status=blocked`. A user reply sets `ask=answered` and points `turn` at the reply. While that answer is pending, an agent note or question changes the root only when its `re` equals `turn`. A resolve also needs that reference while an answer is pending.

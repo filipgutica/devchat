@@ -34,6 +34,10 @@
       {
         "post": { "text": "Please revisit the draft.", "labels": { "rid": "answer-2", "by": "user", "kind": "answer" } },
         "rootLabels": { "rid": "work-1", "by": "agent", "repo": "example/project", "status": "open", "pr.1": "https://example.com/pull/1", "ask": "answered", "turn": "answer-2" }
+      },
+      {
+        "post": { "text": "Picked up the request.", "labels": { "rid": "note-3", "by": "agent", "kind": "note", "re": "answer-2" } },
+        "rootLabels": { "rid": "work-1", "by": "agent", "repo": "example/project", "status": "open", "pr.1": "https://example.com/pull/1" }
       }
     ]
   },

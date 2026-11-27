@@ -1,10 +1,11 @@
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcessByStdio } from 'node:child_process'
 import { once } from 'node:events'
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { request } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
+import type { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 
@@ -61,16 +62,23 @@ export async function startBoardServer({
   login = 'user@example.com',
 }: BoardServerOptions = {}) {
   const cli = fileURLToPath(new URL('./dist/cli.mjs', import.meta.resolve('@vercel/board/package.json')))
-  const runDir = await mkdtemp(join(directory, 'devchat-board-'))
+  // Absolute, because the child resolves paths from its own working directory.
+  const runDir = await mkdtemp(join(resolve(directory), 'devchat-board-'))
   const configHome = join(runDir, 'config')
-  const child = spawn(process.execPath, [
-    cli, 'serve', '--port', '0', '--dir', join(runDir, 'data'),
-    '--tailscale', host, '--no-inspect',
-  ], {
-    cwd: runDir,
-    env: { ...process.env, XDG_CONFIG_HOME: configHome },
-    stdio: ['ignore', 'pipe', 'ignore'],
-  })
+  let child: ChildProcessByStdio<null, Readable, null>
+  try {
+    child = spawn(process.execPath, [
+      cli, 'serve', '--port', '0', '--dir', join(runDir, 'data'),
+      '--tailscale', host, '--no-inspect',
+    ], {
+      cwd: runDir,
+      env: { ...process.env, XDG_CONFIG_HOME: configHome },
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+  } catch (error) {
+    await rm(runDir, { recursive: true, force: true })
+    throw error
+  }
   const closed = new Promise<void>((resolve) => child.once('close', () => resolve()))
   async function stop() {
     child.kill()

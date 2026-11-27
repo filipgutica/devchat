@@ -16,7 +16,7 @@ const work = {
 test('accepts release 1 intent shapes', () => {
   const intents = [
     work,
-    { v: 1, rid: 'todo-1', kind: 'todo', channel: 'todos', text: 'Check the queue.', by: 'agent', work: 1 },
+    { v: 1, rid: 'todo-1', kind: 'todo', channel: 'todos', text: 'Check the queue.', by: 'agent' },
     { v: 1, rid: 'note-1', kind: 'note', root: work.rid, text: 'Draft is ready.', by: 'agent', pr: 'https://example.com/pull/1' },
     { v: 1, rid: 'ask-1', kind: 'ask', root: work.rid, text: 'Can we proceed?', by: 'agent', block: 1 },
     { v: 1, rid: 'done-1', kind: 'done', root: work.rid, text: '', by: 'agent', re: 'answer-1' },
@@ -32,10 +32,17 @@ test('refuses derived fields, the user profile, and deferred kinds', () => {
     { by: 'user' },
     { status: 'done' },
     { kind: 'answer' },
+    { rid: 'x|y' },
+    { by: 'a'.repeat(257) },
+    { repo: 'r'.repeat(257) },
     ...deferredIntentKinds.map((kind) => ({ kind })),
   ]) {
     assert.equal(intentSchema.safeParse({ ...work, ...override }).success, false, JSON.stringify(override))
   }
+})
+
+test('refuses a work-lane todo in release 1', () => {
+  assert.equal(intentSchema.safeParse({ v: 1, rid: 'todo-2', kind: 'todo', channel: 'todos', text: 'Check the queue.', by: 'agent', work: 1 }).success, false)
 })
 
 test('enforces target, Board input, and work-lane boundaries', () => {
