@@ -115,7 +115,10 @@ converge_serve() {
   plan=$(serve_plan "$@") || fail 'planning the tailnet routes failed'
   case "$plan" in
     ''|unchanged) ;;
-    *) fail "tailscale serve did not reach the planned state; still to change: $plan" ;;
+    *) printf 'error: tailscale serve did not reach the planned state; still to change: %s\\n' "$plan" >&2
+      # Fail closed: routes that did not converge leave no devchat mount behind.
+      if [ "\${1:-}" != --remove ]; then converge_serve --remove; fail "removed devchat's tailnet mounts instead"; fi
+      exit 1 ;;
   esac
 }`
 
@@ -247,8 +250,10 @@ if systemctl is-active --quiet ${unitNames.board}; then
   if board_setup --lock-check; then
     LOCK_ON_LOOPBACK=0
   else
-    # Stop first: the board stays down until its routes are gone and it is locked again below.
-    run systemctl stop ${unitNames.board}; applied 'stopped ${unitNames.board} and, through PartOf, ${unitNames.app}'
+    # Stop first: the board stays down until its routes are gone and it is locked again below. The
+    # export service requires the board, so its timer stops too; a later step starts it again.
+    run systemctl stop ${unitNames.exportTimer} ${unitNames.board}
+    applied 'stopped ${unitNames.exportTimer}, ${unitNames.board}, and, through PartOf, ${unitNames.app}'
     # With no tailscale, or tailscaled down, nothing serves the board on the tailnet.
     if command -v tailscale >/dev/null && tailscale serve status >/dev/null 2>&1; then converge_serve --remove; fi
   fi

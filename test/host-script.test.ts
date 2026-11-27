@@ -33,7 +33,7 @@ test('install closes the default grants before the board serves the tailnet, and
   for (const line of serves) assert.doesNotMatch(line, /--tailscale/)
   assert.match(steps[lock]?.bash ?? '', /board_setup --lock\b/)
   // A running board that is not locked stops at once, then loses its tailnet routes, then is relocked.
-  assert.match(steps[lock]?.bash ?? '', /board_setup --lock-check[\s\S]*systemctl stop devchat-board[\s\S]*converge_serve --remove[\s\S]*board_setup --lock\b/)
+  assert.match(steps[lock]?.bash ?? '', /board_setup --lock-check[\s\S]*systemctl stop devchat-export\.timer devchat-board\.service[\s\S]*converge_serve --remove[\s\S]*board_setup --lock\b/)
 })
 
 test('install checks every destination before its first write, and stages only in its own directory', () => {
