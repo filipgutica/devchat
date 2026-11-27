@@ -224,6 +224,7 @@ const appInfo = z.object({
   version: z.string().regex(/^[0-9A-Za-z.+-]{1,64}$/),
   board: z.object({ reachable: z.boolean() }).strict(),
   epoch: z.number().int().optional(),
+  inboxSchedulesCanceled: z.number().int().min(0),
 }).strict()
 
 async function checkApp(settings: Settings, check: Check) {
