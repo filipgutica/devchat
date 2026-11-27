@@ -12,6 +12,9 @@ export const channels = {
   dream: 'dream',
 } as const
 
+/** The board marker in `sys`, posted once by host setup with `epoch=1`. */
+export const boardMarker = { id: 'board', channel: channels.sys } as const
+
 export const labelKeys = [
   'rid', 'status', 'host', 'repo', 'work', 'kind', 'issue', 'machine', 'env',
   'thread', 'ask', 'turn', 'pushed', 'by', 'fwd', 'dest', 'every', 'last', 'src',

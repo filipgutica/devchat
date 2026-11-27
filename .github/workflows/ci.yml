@@ -21,3 +21,25 @@ jobs:
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
+
+  # Installs the packed package the way a host does, then runs the release 1 trust checks.
+  # GitHub's Ubuntu runner has systemd and passwordless sudo; verify itself runs without sudo.
+  host-setup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Install the packed package with npm, as the host runbook does
+        run: |
+          pnpm pack --pack-destination "$RUNNER_TEMP"
+          npm install --ignore-scripts --no-audit --no-fund --prefix "$RUNNER_TEMP/host" "$RUNNER_TEMP"/filipgutica-devchat-*.tgz
+      - name: Install, verify, rerun, restart, export, uninstall
+        run: test/host-setup-ci.sh "$RUNNER_TEMP/host/node_modules/.bin/devchat-host"
