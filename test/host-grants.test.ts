@@ -52,6 +52,13 @@ test('board setup against vb serve', async (t) => {
 
   await t.test('after a restart with --tailscale, setup converges once and a rerun changes nothing', async () => {
     await server.restart({ tailscale: true })
+    // Between the unit's start and the login's grant, a forged tailnet caller gets nothing.
+    const forgedGrant = await server.tailnet.request('/grants/batch', {
+      method: 'POST', body: { grants: [{ principals: [{ kind: 'everyone' }], can: { '*': 'all' } }] },
+    })
+    assert.equal(forgedGrant.status, 403)
+    assert.equal((await server.tailnet.request('/messages', { method: 'POST', body: { channel: 'inbox', text: 'early' } })).status, 403)
+
     const first: string[] = []
     await setupBoard(board(), login, (line) => first.push(line))
     assert.deepEqual(first.filter((line) => line.startsWith('applied:')).map((line) => line.replace(/g\d+/, 'g?')),
