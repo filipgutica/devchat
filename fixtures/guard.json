@@ -1,0 +1,15 @@
+[
+  { "name": "generic todo", "text": "Review the handoff before closing the thread.", "allowed": true },
+  { "name": "plain punctuation", "text": "Check the queue, then retry once.", "allowed": true },
+  { "name": "credential assignment", "text": "api_key=<secret>", "allowed": false },
+  { "name": "private key marker", "text": "-----BEGIN PRIVATE KEY-----", "allowed": false },
+  { "name": "bare URL", "text": "Read https://example.com/help", "allowed": false },
+  { "name": "URL with query", "text": "Read https://example.com/help?view=summary", "allowed": false },
+  { "name": "POSIX home path", "text": "Check /home/<user>/notes.txt", "allowed": false },
+  { "name": "Windows home path", "text": "Check C:\\Users\\<user>\\notes.txt", "allowed": false },
+  { "name": "relative file path", "text": "Check ./docs/notes.md", "allowed": false },
+  { "name": "inline code", "text": "Run `example --check`", "allowed": false },
+  { "name": "ticket key", "text": "Review ABC-123 tomorrow.", "allowed": false },
+  { "name": "transcript marker", "text": "user: Review the changes.", "allowed": false },
+  { "name": "encoded source text", "text": "Use the encoded text %2F", "allowed": false }
+]
