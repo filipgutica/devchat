@@ -1,8 +1,8 @@
 import { Button } from '@ui-sdk/react/button'
 import { useId, useRef, useState, type KeyboardEvent } from 'react'
 import type { UserWrite } from '../../src/shared/layout.ts'
-import { newRid, sendWrite, type Draft } from './api.ts'
-import { readComposer, updateComposer, useComposerState, type ComposerState, type PendingWrite } from './composer-store.ts'
+import { newRid, type Draft } from './api.ts'
+import { attemptWrite, readComposer, updateComposer, useComposerState, type ComposerState, type PendingWrite } from './composer-store.ts'
 import { Icon } from './icons.tsx'
 
 /** The question a reply answers now: the post `turn` names while `ask=open`. */
@@ -52,24 +52,10 @@ export function Composer({ storeKey, label, hint, offline, toDraft, question, on
   const shownHint = offline ? offlineHint : [saved && 'Saved to the board.', hint].filter(Boolean).join(' ')
 
   async function attempt(write: PendingWrite) {
-    update(() => ({ status: { status: 'busy' } }))
-    const outcome = await sendWrite(write.body)
-    if (!outcome.ok) {
-      // Only an answer that proves this rid's fate drops the pending write; otherwise only Retry or
-      // Discard moves past it.
-      update(() => ({
-        status: { status: 'error', message: outcome.message, retry: !outcome.settled },
-        ...(outcome.settled ? { pending: null } : {}),
-      }))
-      return
-    }
     // One change clears the confirmed draft and ends the busy state, so Send can't resend it. A draft
     // edited since keeps its text and the question it is bound to.
-    update((current) => ({
-      pending: null,
-      status: { status: 'idle' },
-      ...(current.text === write.text ? { text: '', bound: null } : {}),
-    }))
+    const confirmed = await attemptWrite(storeKey, write, (current) => (current.text === write.text ? { text: '', bound: null } : {}))
+    if (!confirmed) return
     setSaved(true)
     field.current?.focus()
     void onSaved()

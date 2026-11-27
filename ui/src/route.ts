@@ -15,7 +15,7 @@ const repoPath = (repo: string) => repo.split('/').map(encodeURIComponent).join(
 
 /**
  * `#/needs-you`, `#/global`, `#/repo/<owner>/<repo>`, or `#/search`, with `tab`, `resolved`, `q`, and
- * `thread`. A malformed repo path, such as an empty segment or a bad escape, reads as not found.
+ * `thread`. A malformed repo path, such as a missing or empty segment or a bad escape, reads as not found.
  */
 export function parseRoute(hash: string): Route {
   const [path = '', search = ''] = hash.replace(/^#/, '').split('?')
@@ -24,10 +24,14 @@ export function parseRoute(hash: string): Route {
   const tab: Tab = query.get('tab') === 'work' ? 'work' : 'todos'
   const resolved = query.get('resolved') === '1'
   if (path === '/repo' || path.startsWith('/repo/')) {
-    // A repo path is one or more non-empty segments; anything else, such as `/repo/example/`, is not found.
-    const repo = /^\/repo\/([^/]+(?:\/[^/]+)*)$/.exec(path)?.[1]
+    // A repo is `<owner>/<name>`: exactly two non-empty segments, neither of which decodes to hold a
+    // `/`. Anything else, such as `/repo/example/` or `/repo/example/one%2Ftwo`, is not found.
+    const [, owner, name] = /^\/repo\/([^/]+)\/([^/]+)$/.exec(path) ?? []
     try {
-      if (repo) return { view: { kind: 'channel', repo: repo.split('/').map(decodeURIComponent).join('/'), tab, resolved }, thread }
+      const parts = owner && name ? [owner, name].map(decodeURIComponent) : []
+      if (parts.length === 2 && parts.every((part) => part !== '' && !part.includes('/'))) {
+        return { view: { kind: 'channel', repo: parts.join('/'), tab, resolved }, thread }
+      }
     } catch {
       // A malformed escape, such as a lone `%`.
     }

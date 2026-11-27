@@ -366,7 +366,7 @@ test('A retry refused with 503 keeps the unconfirmed write: after recovery, Retr
   expect((await posts(host, 'todos')).map((post) => post.text)).toEqual(['Saved once.'])
 })
 
-test('Resolve stays locked after the board confirms it until the pane shows the thread resolved', async ({ page, host }) => {
+test('Resolve stays locked after the board confirms it until a read of the thread finishes after that', async ({ page, host }) => {
   await host.submit({ ...agent, rid: 'todo-1', kind: 'todo', channel: 'todos', text: 'Water the plants.' })
   await host.pass()
   await open(page, host, '#/global?thread=todo-1')
@@ -380,7 +380,8 @@ test('Resolve stays locked after the board confirms it until the pane shows the 
   })
   hold = true
   await pane.getByRole('button', { name: 'Resolve' }).click()
-  await expect.poll(() => host.writes.length).toBe(1)
+  // The board confirmed it: focus moves to the heading, while the read after it is held.
+  await expect(pane.getByRole('heading', { name: /Thread/ })).toBeFocused()
   await expect(pane.getByRole('button', { name: 'Resolve' })).toBeDisabled()
   await pane.getByRole('button', { name: 'Resolve' }).click({ force: true })
   expect(host.writes).toHaveLength(1)
@@ -390,6 +391,80 @@ test('Resolve stays locked after the board confirms it until the pane shows the 
   await expect(pane.getByRole('button', { name: 'Resolve' })).toHaveCount(0)
   expect(host.writes).toHaveLength(1)
   expect((await posts(host, 'todos')).filter((post) => post.labels.kind === 'done')).toHaveLength(1)
+})
+
+test('An unconfirmed resolve survives closing the pane: reopened, it offers Retry or Discard, and Retry replays the same rid', async ({ page, host }) => {
+  await host.submit({ ...agent, rid: 'todo-1', kind: 'todo', channel: 'todos', text: 'Water the plants.' })
+  await host.pass()
+  await open(page, host, '#/global?thread=todo-1')
+  const pane = page.getByRole('complementary', { name: /Thread/ })
+  host.dropNextWriteResponse()
+  await pane.getByRole('button', { name: 'Resolve' }).click()
+  await expect(pane.getByRole('button', { name: 'Retry' })).toBeVisible()
+
+  // Closed and opened again in the same page: the list no longer shows the todo once a read finds it resolved.
+  await pane.getByRole('button', { name: 'Close thread' }).click()
+  await expect(pane).toHaveCount(0)
+  await page.evaluate(() => { location.hash = '#/global?thread=todo-1' })
+  await expect(pane.getByRole('button', { name: 'Retry' })).toBeVisible()
+  await expect(pane.getByRole('button', { name: 'Discard' })).toBeVisible()
+  await pane.getByRole('button', { name: 'Retry' }).click()
+  await expect(pane.getByRole('button', { name: 'Retry' })).toHaveCount(0)
+  await expect(pane.locator('.pane-head .badge')).toHaveText('Done')
+  expect(host.writes).toHaveLength(2)
+  expect(host.writes[1]).toBe(host.writes[0])
+  expect((await posts(host, 'todos')).filter((post) => post.labels.kind === 'done')).toHaveLength(1)
+})
+
+test('While a resolve is unconfirmed, Resolve stays locked; only Retry or Discard moves past it', async ({ page, host }) => {
+  await host.submit({ ...agent, rid: 'todo-1', kind: 'todo', channel: 'todos', text: 'Water the plants.' })
+  await host.pass()
+  await open(page, host, '#/global?thread=todo-1')
+  const pane = page.getByRole('complementary', { name: /Thread/ })
+  // The connection fails before the board sees the resolve.
+  await page.route('**/api/ui/posts', (route) => route.abort('connectionreset'), { times: 1 })
+  await pane.getByRole('button', { name: 'Resolve' }).click()
+  await expect(pane.getByRole('button', { name: 'Retry' })).toBeVisible()
+  await expect(pane.getByRole('button', { name: 'Resolve' })).toBeDisabled()
+  await pane.getByRole('button', { name: 'Resolve' }).click({ force: true })
+
+  await pane.getByRole('button', { name: 'Discard' }).click()
+  await expect(pane.getByRole('button', { name: 'Retry' })).toHaveCount(0)
+  await pane.getByRole('button', { name: 'Resolve' }).click()
+  await expect(pane.locator('.pane-head .badge')).toHaveText('Done')
+  expect(host.writes).toHaveLength(1)
+  expect((await posts(host, 'todos')).filter((post) => post.labels.kind === 'done')).toHaveLength(1)
+})
+
+test('A poll that shows the thread resolved before the 201 arrives leaves Resolve enabled once an agent reopens it', async ({ page, host }) => {
+  await host.submit({ ...agent, rid: 'work-1', kind: 'work', channel: 'work', text: 'Ship the exporter.', repo: 'example/one' })
+  await host.pass()
+  await page.clock.install()
+  await open(page, host, '#/needs-you?thread=work-1')
+  const pane = page.getByRole('complementary', { name: /Thread/ })
+  let release = () => {}
+  const held = new Promise<void>((resolve) => { release = resolve })
+  let answered = () => {}
+  const saved = new Promise<void>((resolve) => { answered = resolve })
+  // The board saves the resolve at once; its answer reaches the page only later.
+  await page.route('**/api/ui/posts', async (route) => {
+    const response = await route.fetch()
+    answered()
+    await held
+    await route.fulfill({ response })
+  }, { times: 1 })
+  await pane.getByRole('button', { name: 'Resolve' }).click()
+  await saved
+  await page.clock.runFor(15_000)
+  await expect(pane.locator('.pane-head .badge')).toHaveText('Done')
+  release()
+  await expect(page.getByRole('status').filter({ hasText: 'Thread resolved' })).toBeAttached()
+
+  await host.submit({ ...agent, rid: 'note-1', root: 'work-1', kind: 'note', text: 'Reopening: the build failed.' })
+  await host.pass()
+  await page.clock.runFor(15_000)
+  await expect(pane.locator('.pane-head .badge')).toHaveCount(0)
+  await expect(pane.getByRole('button', { name: 'Resolve' })).toBeEnabled()
 })
 
 test('Send stays locked until the confirmed draft is cleared, even while the read after it is held', async ({ page, host }) => {
@@ -523,7 +598,7 @@ test('A repo name with % links and opens its channel; a malformed link shows not
   await expect(rows(page, 'Open work items in #100%done')).toHaveCount(1)
   expect(page.url()).toContain('#/repo/example/100%25done')
 
-  for (const hash of ['#/repo/example/100%done', '#/repo/example/', '#/repo/', '#/repo', '#/repo//one']) {
+  for (const hash of ['#/repo/example/100%done', '#/repo/example/', '#/repo/', '#/repo', '#/repo//one', '#/repo/example', '#/repo/example/one%2Ftwo', '#/repo/a/b/c']) {
     await page.goto(`${host.url}#/needs-you`)
     await expect(page.getByRole('heading', { name: 'Needs you', level: 1 })).toBeVisible()
     await page.goto(`${host.url}${hash}`)

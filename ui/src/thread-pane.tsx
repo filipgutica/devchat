@@ -1,17 +1,19 @@
 import { Button } from '@ui-sdk/react/button'
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react'
-import type { Message, Thread } from './api.ts'
+import { newRid, type Message, type Thread } from './api.ts'
+import { attemptWrite, readComposer, stamp, updateComposer, useComposerState, type PendingWrite } from './composer-store.ts'
 import { Composer, type Question } from './composer.tsx'
-import { ThreadRefs } from './refs.tsx'
 import { byOf, channelName, replyCount } from './format.ts'
 import { Icon } from './icons.tsx'
 import { MessageRow, MessageStream, type RowStatus } from './message.tsx'
-import { useWrite } from './use-write.ts'
+import { ThreadRefs } from './refs.tsx'
 
 type ThreadPaneProps = {
   rid: string
   /** The thread as last read; undefined while the first read runs, null when the board has no such thread. */
   thread: Thread | null | undefined
+  /** The `stamp` of the finish of the read that gave `thread`; 0 before one. */
+  readAt: number
   repos: string[]
   offline: boolean
   onClose: () => void
@@ -96,12 +98,13 @@ function composerWording({ root, replies }: Thread) {
  * The open thread beside its channel (components.md, Thread panel): the root and its replies,
  * Resolve while it is open, and, under a work item, a composer for the user's answer.
  */
-export function ThreadPane({ rid, thread, repos, offline, onClose, onSaved }: ThreadPaneProps) {
+export function ThreadPane({ rid, thread, readAt, repos, offline, onClose, onSaved }: ThreadPaneProps) {
   const headingId = useId()
   const heading = useRef<HTMLHeadingElement>(null)
   const resolveButton = useRef<HTMLButtonElement>(null)
   const [width, setWidth] = useState(defaultWidth)
-  const resolve = useWrite(() => onSaved('Thread resolved'))
+  const resolveKey = `resolve:${rid}`
+  const { status: resolveStatus, pending: resolvePending } = useComposerState(resolveKey)
 
   // Opening a thread moves focus to the pane's heading.
   useEffect(() => heading.current?.focus(), [rid])
@@ -109,18 +112,35 @@ export function ThreadPane({ rid, thread, repos, offline, onClose, onSaved }: Th
   const root = thread?.root
   const labels = root?.labels ?? {}
   const resolved = isResolved(labels.status)
-  const resolveError = resolve.state.status === 'error' ? resolve.state.message : null
-  // A confirmed resolve keeps Resolve locked until the pane shows the thread resolved, so a second
-  // click while the page reads the board again writes nothing.
-  const { reset: resetResolve } = resolve
-  useEffect(() => {
-    if (resolved) resetResolve()
-  }, [resolved, resetResolve])
+  const resolveError = resolveStatus.status === 'error' ? resolveStatus : null
+  const resolving = resolveStatus.status === 'busy'
+  // After a confirmed resolve, Resolve stays locked until a read of this thread finishes after it,
+  // whatever that read shows, so a second click before the pane catches up writes nothing.
+  const resolveLocked = resolving || resolvePending !== null || (resolveStatus.status === 'saved' && readAt <= resolveStatus.stamp)
 
-  async function onResolve() {
+  async function sendResolve(write: PendingWrite) {
+    const confirmed = await attemptWrite(resolveKey, write, () => ({ status: { status: 'saved', stamp: stamp() } }))
+    if (confirmed) void onSaved('Thread resolved')
     // Resolve removes itself, so focus moves to the heading; a refusal returns it to Resolve.
-    if (await resolve.send({ kind: 'done', root: rid })) heading.current?.focus()
+    if (confirmed) heading.current?.focus()
     else resolveButton.current?.focus()
+  }
+
+  function onResolve() {
+    if (resolveLocked || readComposer(resolveKey).status.status === 'busy') return
+    const write: PendingWrite = Object.freeze({ text: '', body: Object.freeze({ kind: 'done', root: rid, rid: newRid() } as const) })
+    updateComposer(resolveKey, () => ({ pending: write }))
+    void sendResolve(write)
+  }
+
+  function retryResolve() {
+    const { pending, status } = readComposer(resolveKey)
+    if (pending && status.status !== 'busy') void sendResolve(pending)
+  }
+
+  function discardResolve() {
+    updateComposer(resolveKey, () => ({ pending: null, status: { status: 'idle' } }))
+    resolveButton.current?.focus()
   }
 
 
@@ -137,8 +157,8 @@ export function ThreadPane({ rid, thread, repos, offline, onClose, onSaved }: Th
         </h4>
         {root && <StateBadge labels={labels} />}
         {root && !resolved && (
-          <Button ref={resolveButton} data-variant="secondary" data-size="sm" aria-busy={resolve.state.status === 'busy' ? 'true' : undefined}
-            disabled={offline || resolve.state.status === 'busy' || resolve.state.status === 'saved'} onClick={() => void onResolve()}>
+          <Button ref={resolveButton} data-variant="secondary" data-size="sm" aria-busy={resolving ? 'true' : undefined}
+            disabled={offline || resolveLocked} onClick={onResolve}>
             Resolve
           </Button>
         )}
@@ -147,7 +167,21 @@ export function ThreadPane({ rid, thread, repos, offline, onClose, onSaved }: Th
         </Button>
       </div>
       <div className="pane-body">
-        {resolveError && <div className="alert danger" role="alert"><Icon name="alert" /><p>{resolveError}</p></div>}
+        {resolveError && (
+          <div className="alert danger" role="alert">
+            <Icon name="alert" />
+            <div className="alert-body">
+              <p>{resolveError.message}</p>
+              {/* An unconfirmed resolve is retried or discarded; Resolve stays locked until then. */}
+              {resolveError.retry && resolvePending && (
+                <p className="alert-actions">
+                  <Button data-variant="text" data-size="sm" disabled={offline} onClick={retryResolve}>Retry</Button>
+                  <Button data-variant="text" data-size="sm" onClick={discardResolve}>Discard</Button>
+                </p>
+              )}
+            </div>
+          </div>
+        )}
         {thread === undefined && <p className="quiet">Loading the thread…</p>}
         {thread === null && <p className="quiet">This thread isn't on the board.</p>}
         {root && (

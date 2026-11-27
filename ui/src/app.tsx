@@ -3,6 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEve
 import { read, readChannel, readThread, Unreachable, type NeedsYou, type Thread, type ThreadSummary } from './api.ts'
 import { authorName, byOf, channelName, clock } from './format.ts'
 import { Icon, IconSprite } from './icons.tsx'
+import { stamp } from './composer-store.ts'
 import { AuthorsInView } from './message.tsx'
 import { parseRoute, routeHref, type Route, type View } from './route.ts'
 import { ThreadPane } from './thread-pane.tsx'
@@ -31,7 +32,8 @@ export function App() {
   const [needsYou, setNeedsYou] = useState<NeedsYou>()
   const [repos, setRepos] = useState<string[]>([])
   const [list, setList] = useState<{ key: string; threads: ThreadSummary[] | null }>()
-  const [thread, setThread] = useState<{ rid: string; value: Thread | null }>()
+  /** The open thread as last read, and the stamp of that read's finish. */
+  const [thread, setThread] = useState<{ rid: string; value: Thread | null; readAt: number }>()
   const [offline, setOffline] = useState(false)
   const [readError, setReadError] = useState<string | null>(null)
   const [loadedAt, setLoadedAt] = useState<string | null>(null)
@@ -62,7 +64,7 @@ export function App() {
       setNeedsYou(needs)
       setRepos(channels.repos)
       setList({ key: viewKey(asked.view), threads })
-      setThread(asked.thread && opened !== undefined ? { rid: asked.thread, value: opened } : undefined)
+      setThread(asked.thread && opened !== undefined ? { rid: asked.thread, value: opened, readAt: stamp() } : undefined)
       setOffline(false)
       setReadError(null)
       setLoadedAt(new Date().toISOString())
@@ -194,7 +196,7 @@ export function App() {
           </main>
           {route.thread && (
             <ThreadPane key={route.thread} rid={route.thread} repos={repos} offline={offline} onClose={closeThread} onSaved={onSaved}
-              thread={thread?.rid === route.thread ? thread.value : undefined} />
+              thread={thread?.rid === route.thread ? thread.value : undefined} readAt={thread?.rid === route.thread ? thread.readAt : 0} />
           )}
         </div>
       </AuthorsInView.Provider>
