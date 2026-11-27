@@ -1,12 +1,13 @@
 import { board, BoardError, type Board, type MessageView } from '@vercel/board'
 import { readFile, rename, writeFile } from 'node:fs/promises'
+import { isDeepStrictEqual } from 'node:util'
 import { z } from 'zod'
 import {
   appMarker, boardMarker, channels, deferredIntentKinds, intentSchema, type Intent, type RefusalReason,
 } from '../shared/layout.ts'
 import type { Settings } from '../host/settings.ts'
 import { createBoardPort, type BoardPort } from './board-port.ts'
-import { foldState, stateChange } from './fold.ts'
+import { foldState, isStateLabel, stateChange } from './fold.ts'
 
 const conversationChannels: readonly string[] = [channels.todos, channels.work, channels.msg]
 
@@ -63,7 +64,12 @@ async function foldThread(port: BoardPort, rootId: string) {
   }
   const state = foldState(replies.filter(({ deleted }) => !deleted).map(({ labels }) => labels))
   const change = stateChange(root.labels, state)
-  if (change) await port.setLabels(root.id, change)
+  try {
+    if (change) await port.setLabels(root.id, change)
+  } catch (error) {
+    // A root deleted on the board keeps no labels: its thread has no state left to write.
+    if (!(error instanceof BoardError && error.code === 'message_deleted')) throw error
+  }
   return state
 }
 
@@ -93,12 +99,9 @@ async function writeCanonical(write: () => Promise<MessageView>) {
   }
 }
 
-/** Whether `post` is what the normal write path writes for `intent`: a reused rid that names another post is not. */
-const isCanonicalFor = (intent: Intent, post: MessageView) => ('root' in intent
-  ? post.re !== null && post.labels.kind === intent.kind && conversationChannels.includes(post.channel)
-  : post.re === null && post.channel === intent.channel)
+type Labels = Record<string, string>
 
-const definedLabels = (labels: Record<string, string | undefined>) =>
+const definedLabels = (labels: Record<string, string | undefined>): Labels =>
   Object.fromEntries(Object.entries(labels).filter((entry): entry is [string, string] => entry[1] !== undefined))
 
 type WriterOptions = {
@@ -122,44 +125,66 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
     }
   }
 
-  async function writeRoot(port: BoardPort, intent: Extract<Intent, { kind: 'todo' | 'work' }>): Promise<RefusalReason | null> {
+  /**
+   * The text and labels of the canonical post `intent` stands for. A root's routing labels are set
+   * here, once; no later post or fold changes them.
+   */
+  function canonicalPost(intent: Intent): { text: string; labels: Labels } | RefusalReason {
+    if (!('root' in intent)) {
+      const { machine } = intent
+      return {
+        text: intent.text,
+        labels: definedLabels({
+          rid: intent.rid,
+          by: intent.by,
+          repo: intent.repo,
+          machine,
+          env: machine !== undefined && Object.hasOwn(settings.machines, machine) ? settings.machines[machine] : undefined,
+          thread: intent.thread,
+          issue: intent.kind === 'work' ? intent.issue : undefined,
+        }),
+      }
+    }
+    const labels = definedLabels({ rid: intent.rid, by: intent.by, kind: intent.kind, re: intent.re })
+    if (intent.kind === 'note' && intent.pr !== undefined) {
+      const number = prNumber(intent.pr)
+      if (number === null) return 'pr'
+      labels[`pr.${number}`] = intent.pr
+    }
+    if (intent.kind === 'ask' && intent.block === 1) labels.block = '1'
+    const text = intent.kind === 'done' ? 'Resolved.' : intent.kind === 'drop' ? 'Dropped.' : intent.text
+    return { text, labels }
+  }
+
+  /**
+   * Whether `written`, the app's post `app:<rid>`, is the canonical post of this very intent: the
+   * same parent root, text, and labels. A root's state labels change with its thread, and its `env`
+   * with the host's machine map, so neither is compared. A rid reused by another intent is not.
+   */
+  function isReplay(written: MessageView, post: { text: string; labels: Labels }, parent: MessageView | null) {
+    const fixed = (labels: Labels) => (written.re === null
+      ? Object.fromEntries(Object.entries(labels).filter(([key]) => !isStateLabel(key) && key !== 'env'))
+      : labels)
+    return written.re === (parent?.id ?? null) && written.text === post.text && isDeepStrictEqual(fixed(written.labels), fixed(post.labels))
+  }
+
+  async function writeRoot(port: BoardPort, intent: Extract<Intent, { kind: 'todo' | 'work' }>, post: { text: string; labels: Labels }) {
     if (intent.repo !== undefined && !isAllowlisted(intent.repo, settings.allowlist)) return 'repo'
-    const { machine } = intent
-    // Routing labels are set here, once; no later post or fold changes them.
-    const labels = definedLabels({
-      rid: intent.rid,
-      by: intent.by,
-      repo: intent.repo,
-      machine,
-      env: machine !== undefined && Object.hasOwn(settings.machines, machine) ? settings.machines[machine] : undefined,
-      thread: intent.thread,
-      issue: intent.kind === 'work' ? intent.issue : undefined,
-    })
-    const root = await writeCanonical(() => port.post(intent.channel, { id: `app:${intent.rid}`, text: intent.text, labels }))
+    const root = await writeCanonical(() => port.post(intent.channel, { id: `app:${intent.rid}`, ...post }))
     if (!root) return 'invalid'
     await foldThread(port, root.id)
     return null
   }
 
-  async function writeReply(port: BoardPort, intent: Extract<Intent, { root: string }>): Promise<RefusalReason | null> {
-    const target = await findOwn(port, `app:${intent.root}`)
-    if (!target || target.re !== null || !conversationChannels.includes(target.channel)) return 'root'
+  async function writeReply(port: BoardPort, intent: Extract<Intent, { root: string }>, post: { text: string; labels: Labels }, target: MessageView | null) {
+    if (!target || target.deleted || target.re !== null || !conversationChannels.includes(target.channel)) return 'root'
     if (target.channel === channels.msg && intent.by !== 'coordinator') return 'profile'
-    const labels: Record<string, string> = definedLabels({ rid: intent.rid, by: intent.by, kind: intent.kind, re: intent.re })
-    let text = intent.text
-    if (intent.kind === 'note' && intent.pr !== undefined) {
-      const number = prNumber(intent.pr)
-      if (number === null) return 'pr'
-      labels[`pr.${number}`] = intent.pr
-    } else if (intent.kind === 'ask' && intent.block === 1) {
-      labels.block = '1'
-    } else if (intent.kind === 'done' || intent.kind === 'drop') {
+    if (intent.kind === 'done' || intent.kind === 'drop') {
       // Pending guard, from a fresh fold: the root's labels may predate a crash.
       const state = await foldThread(port, target.id)
       if (state.ask === 'answered' && intent.re !== state.turn) return 'pending'
-      text = intent.kind === 'done' ? 'Resolved.' : 'Dropped.'
     }
-    if (!await writeCanonical(() => port.reply(target.id, { id: `app:${intent.rid}`, text, labels }))) return 'invalid'
+    if (!await writeCanonical(() => port.reply(target.id, { id: `app:${intent.rid}`, ...post }))) return 'invalid'
     await foldThread(port, target.id)
     return null
   }
@@ -178,16 +203,21 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
     const parsed = intentSchema.safeParse(json)
     if (!parsed.success) return 'invalid'
     const intent = parsed.data
-    // The decision already made: a canonical post means the intent was applied, whatever was written
-    // since, so a replay folds that post's thread and checks nothing else (§12, Recovery). No intent
-    // Board accepted fails the schema, so checking it first refuses nothing that was applied.
+    const post = canonicalPost(intent)
+    if (typeof post === 'string') return post
+    const target = 'root' in intent ? await findOwn(port, `app:${intent.root}`) : null
+    // The decision already made: this intent's canonical post means it was applied, whatever was
+    // written since, so a replay folds that post's thread and checks nothing else (§12, Recovery).
+    // No intent Board accepted fails the checks above, so they refuse nothing that was applied.
     const written = await findOwn(port, `app:${intent.rid}`)
     if (written) {
-      if (!isCanonicalFor(intent, written)) return 'rid'
+      // A deleted post keeps no text or labels to compare, and its thread no state to write.
+      if (written.deleted) return null
+      if (!isReplay(written, post, target)) return 'rid'
       await foldThread(port, written.re ?? written.id)
       return null
     }
-    return 'root' in intent ? writeReply(port, intent) : writeRoot(port, intent)
+    return 'root' in intent ? writeReply(port, intent, post, target) : writeRoot(port, intent, post)
   }
 
   /** Decides every `inbox` post after `after`, a page at a time, and moves `applied` past each page. */

@@ -39,11 +39,11 @@ Release 1 refuses `msg`, `queue`, `ack`, and reactions (`react`). The app writes
 
 ## Ingest
 
-The app's state writer reads `inbox` in log order from the app marker's `applied` label, every 15 s. For each intent it writes the canonical post, or sets `refused=<reason>` on the intent's `inbox` post and writes nothing. Before it validates an intent, it looks for `app:<rid>`: an intent with a canonical post was already applied, and a replay only folds that post's thread again.
+The app's state writer reads `inbox` in log order from the app marker's `applied` label, every 15 s. For each intent it writes the canonical post, or sets `refused=<reason>` on the intent's `inbox` post and writes nothing. It validates each intent first, then looks for `app:<rid>`. When that post is this intent's canonical post, with the same parent root, text, and labels, the intent was already applied: a replay only folds that post's thread again and repeats no other check, such as the pending guard. A root's state labels and `env` are not compared, since they change after the root is written. Any other post with that ID refuses the intent as `rid`. A deleted canonical post counts as applied.
 
 - A new root carries `rid`, `by`, and the routing labels `repo`, `machine`, `env`, and `thread`, set once; a work item also carries `issue`. The app sets `env` from the host's machine map (`devchat-host install --machine <name>=<T3 environment ID>`) and leaves it unset for a machine the map does not name.
 - A reply carries `rid`, `by`, `kind`, and the applicable `re`, `block=1`, or `pr.<n>`, where `<n>` is the number at the end of the `pr` URL's `/pull/<n>` path.
-- After each post, the app folds the thread from its root and writes `status`, `ask`, `turn`, and `pr.<n>` on the root.
+- After each post, the app folds the thread from its root and writes `status`, `ask`, `turn`, and `pr.<n>` on the root. A root deleted on the board keeps no labels, so its fold writes nothing.
 - After each page of `inbox` posts, the app sets `applied` on its marker to the message ID of the last post in the page: a decided intent, a refused one, or the marker itself. Every intent up to `applied` has its canonical post and root labels, or `refused`. A message ID is the board's log index (F2): to learn whether `applied` covers a post, compare the two IDs as integers, never as strings (`'9'` sorts after `'10'`).
 
 | `refused` | Why |
@@ -52,9 +52,9 @@ The app's state writer reads `inbox` in log order from the app marker's `applied
 | `json` | The text is not JSON. |
 | `deferred` | `kind` is `msg`, `queue`, `ack`, or `react`, which arrive in release 2. |
 | `invalid` | The intent does not match the release 1 schema: for example `kind=answer`, `by=user`, a state field such as `status`, or text or a label value Board cannot store. Also an intent whose canonical post Board refuses with a 400. |
-| `rid` | The `rid` already names an app post of another kind or channel. |
+| `rid` | The `rid` already names another post: a different root, parent, kind, text, or label. |
 | `repo` | `repo` is not `<owner>/<repo>` with its owner on the host allowlist (`devchat-host install --allowlist <owner,...>`). An empty allowlist refuses every `repo`. |
-| `root` | No todo, work, or message root has the `rid` that `root` names. |
+| `root` | No todo, work, or message root has the `rid` that `root` names, or that root is deleted. |
 | `profile` | A reply in `msg` comes from a profile other than `coordinator`. |
 | `pr` | The `pr` URL does not end in `/pull/<n>`. |
 | `pending` | A resolve while a user reply is pending, without `re` naming it (`turn`). |

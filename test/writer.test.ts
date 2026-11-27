@@ -326,6 +326,44 @@ test('Ingest: a reused rid that names an app post of another kind or channel, su
   assert.equal((await host.owner.thread((await host.owner.posted('app:work-1')).id)).replies.length, 0)
 })
 
+test('Ingest: a reused rid on a reply to another root, or with other text, is refused as rid and its post is not lost silently', async (t) => {
+  const host = await startHost(t)
+  await host.submit(work('work-a'))
+  await host.submit(work('work-b'))
+  await host.submit({ ...base, rid: 'note-1', kind: 'note', root: 'work-a', text: 'On a.' })
+  await host.writer().pass()
+  const onB = await host.submit({ ...base, rid: 'note-1', kind: 'note', root: 'work-b', text: 'On a.' }, 'note-1-on-b')
+  const otherText = await host.submit({ ...base, rid: 'note-1', kind: 'note', root: 'work-a', text: 'Changed.' }, 'note-1-changed')
+  const asAsk = await host.submit({ ...base, rid: 'note-1', kind: 'ask', root: 'work-a', text: 'On a.' }, 'note-1-ask')
+  const same = await host.submit({ ...base, rid: 'note-1', kind: 'note', root: 'work-a', text: 'On a.' }, 'note-1-again')
+  await host.writer().pass()
+
+  const refusedOf = async (id: string) => (await host.messages('inbox')).find((message) => message.id === id)?.labels.refused
+  assert.equal(await refusedOf(onB), 'rid')
+  assert.equal(await refusedOf(otherText), 'rid')
+  assert.equal(await refusedOf(asAsk), 'rid')
+  assert.equal(await refusedOf(same), undefined)
+  const replies = async (rid: string) => (await host.owner.thread((await host.owner.posted(`app:${rid}`)).id)).replies.length
+  assert.deepEqual([await replies('work-a'), await replies('work-b')], [1, 0])
+})
+
+test('Ingest: a root deleted on the board stalls nothing: its fold is skipped, a new reply to it is refused as root, and applied moves on', async (t) => {
+  const host = await startHost(t)
+  await host.submit(work('work-1'))
+  await host.writer().pass()
+  await host.submit({ ...base, rid: 'note-1', kind: 'note', root: 'work-1', text: 'Lands, then the root goes.' })
+  await assert.rejects(host.writer(({ method, id }) => method === 'reply' && id === 'app:note-1').pass(), /crash/)
+  await host.owner.delete((await host.owner.posted('app:work-1')).id)
+  const late = await host.submit({ ...base, rid: 'note-2', kind: 'note', root: 'work-1', text: 'Too late.' })
+  const last = await host.submit({ ...base, rid: 'todo-1', kind: 'todo', channel: 'todos', text: 'Still lands.' })
+  await host.writer().pass()
+
+  assert.equal((await host.messages('inbox')).find(({ id }) => id === late)?.labels.refused, 'root')
+  assert.equal(await host.canonical('note-2'), null)
+  assert.deepEqual(await host.rootLabels('todo-1'), { rid: 'todo-1', by: base.by, status: 'open' })
+  assert.equal(await host.applied(), last)
+})
+
 /** The board as rids: each conversation post's labels and text, the reply counts, and inbox decisions. */
 async function boardState(host: Awaited<ReturnType<typeof startHost>>) {
   const posts: Record<string, { labels: Labels; text: string }> = {}
