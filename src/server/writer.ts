@@ -230,8 +230,6 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
     const parsed = intentSchema.safeParse(json)
     if (!parsed.success) return 'invalid'
     const intent = parsed.data
-    // The UI namespace: only the UI route writes posts with these rids.
-    if (isUiNamespace(intent.rid)) return 'rid'
     const post = canonicalPost(intent)
     if (typeof post === 'string') return post
     const target = 'root' in intent ? await findOwn(port, `app:${intent.root}`) : null
@@ -244,6 +242,9 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
       await foldThread(port, written.re ?? written.id)
       return null
     }
+    // The UI namespace: only the UI route makes new posts with these rids. A UI post never replays
+    // as an intent above, since no intent carries `by=user`.
+    if (isUiNamespace(intent.rid)) return 'rid'
     return 'root' in intent ? writeReply(port, intent, post, target) : writeRoot(port, intent, post)
   }
 

@@ -1,4 +1,4 @@
-import type { Board } from '@vercel/board'
+import type { Board, MessageView } from '@vercel/board'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Settings } from '../host/settings.ts'
 import { channels, rid, userWriteSchema, type UserWrite } from '../shared/layout.ts'
@@ -47,12 +47,15 @@ async function readBody(request: IncomingMessage) {
   return Buffer.concat(chunks).toString('utf8')
 }
 
-/** Every page of threads a label query matches, newest activity first. */
+/** A thread whose root is not deleted: Board answers a deleted root as a tombstone with no labels. */
+const isLive = ({ message }: { message: MessageView }) => !message.deleted
+
+/** Every live thread a label query matches, newest activity first. */
 async function allThreads(port: BoardPort, query: { channel: ViewChannel; label: string[] }) {
   const threads = []
   for (let before: string | undefined; ;) {
     const page = await port.threads({ ...query, limit: 500, ...(before ? { before } : {}) })
-    threads.push(...page.threads)
+    threads.push(...page.threads.filter(isLive))
     if (!page.older) return threads
     before = page.older
   }
@@ -84,7 +87,7 @@ async function openThreads(port: BoardPort, { channel, repo, before }: { channel
   let older: string | null = before ?? null
   do {
     const page = await port.threads({ channel, limit: openPageSize, ...(repo ? { label: [`repo=${repo}`] } : {}), ...(older ? { before: older } : {}) })
-    threads.push(...page.threads.filter(({ message }) => isOpen(message.labels.status)))
+    threads.push(...page.threads.filter((thread) => isLive(thread) && isOpen(thread.message.labels.status)))
     older = page.older ?? null
   } while (older !== null && threads.length < openPageSize)
   return { threads, older }
@@ -96,10 +99,13 @@ async function openThreads(port: BoardPort, { channel, repo, before }: { channel
  */
 const reads: Record<string, (port: BoardPort, query: URLSearchParams) => Promise<[number, unknown]>> = {
   // Needs you: open questions and blocked items, then the threads waiting for an agent. A user
-  // answer moves a blocked item to the second list: `ask=answered` wins over `status=blocked`.
+  // answer moves a blocked item to the second list: `ask=answered` wins over `status=blocked`. The
+  // second read runs last, so a thread answered between the two reads shows only there.
   async 'needs-you'(port) {
-    const open = (await viewThreads(port, ['ask=open', 'status=blocked'])).filter(({ message }) => message.labels.ask !== 'answered')
+    const candidates = await viewThreads(port, ['ask=open', 'status=blocked'])
     const answered = await viewThreads(port, ['ask=answered'])
+    const answeredIds = new Set(answered.map(({ message }) => message.id))
+    const open = candidates.filter(({ message }) => !answeredIds.has(message.id))
     return [200, { open, answered }]
   },
   // The project channels: every allowlisted repo a todo or work item names.
@@ -116,7 +122,7 @@ const reads: Record<string, (port: BoardPort, query: URLSearchParams) => Promise
     const before = query.get('before') ?? undefined
     if (query.get('resolved') === '1') {
       const page = await port.threads({ channel, label: ['status=done|dropped', ...(repo ? [`repo=${repo}`] : [])], ...(before ? { before } : {}) })
-      return [200, { threads: page.threads, older: page.older ?? null }]
+      return [200, { threads: page.threads.filter(isLive), older: page.older ?? null }]
     }
     return [200, await openThreads(port, { channel, repo, before })]
   },
@@ -124,7 +130,7 @@ const reads: Record<string, (port: BoardPort, query: URLSearchParams) => Promise
   async thread(port, query) {
     const parsed = rid.safeParse(query.get('rid'))
     const root = parsed.success ? await findOwn(port, `app:${parsed.data}`) : null
-    if (!root || root.re !== null || !isViewChannel(root.channel)) return [404, { error: 'no such thread' }]
+    if (!root || root.deleted || root.re !== null || !isViewChannel(root.channel)) return [404, { error: 'no such thread' }]
     return [200, await readWholeThread(port, root.id)]
   },
 }

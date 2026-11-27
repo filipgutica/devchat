@@ -45,7 +45,9 @@ const browser: Headers = {
  * A real `vb serve` with devchat's grants, a state writer, and the app with its UI route on
  * loopback. `openBoard` lets a test watch the writer's board calls.
  */
-async function startHost(t: TestContext, { withGuard = true, openBoard = () => board(), httpsPort = settings.httpsPort } = {}) {
+async function startHost(t: TestContext, {
+  withGuard = true, openBoard = () => board(), readBoard = () => board(), httpsPort = settings.httpsPort,
+} = {}) {
   const server = await startBoardServer()
   t.after(server.stop)
   process.env.BOARD_URL = server.url
@@ -54,7 +56,7 @@ async function startHost(t: TestContext, { withGuard = true, openBoard = () => b
   const dir = await mkdtemp(join(tmpdir(), 'devchat-ui-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
   const writer = createStateWriter({ settings: { allowlist: ['example'], machines: {} }, stateFile: join(dir, 'app-state.json'), openBoard })
-  const app = createApp({ version: '0.0.0', ui: { settings: { ...settings, httpsPort }, guard: withGuard ? guardReason : undefined, writer } })
+  const app = createApp({ version: '0.0.0', openBoard: readBoard, ui: { settings: { ...settings, httpsPort }, guard: withGuard ? guardReason : undefined, writer } })
   app.listen(0, '127.0.0.1')
   await once(app, 'listening')
   t.after(() => app.close())
@@ -367,4 +369,67 @@ test('Ingest refuses an intent whose rid is in the UI namespace, so no agent cla
   assert.deepEqual((await host.messages('inbox')).filter(({ labels }) => labels.rid === undefined && !labels.applied).map(({ labels }) => labels.refused),
     ['rid', 'rid', 'rid'])
   assert.deepEqual(await host.messages('todos'), [])
+})
+
+test('Ingest replays an agent intent with a ui- rid whose canonical post it already wrote, and refuses one that names a UI post', async (t) => {
+  const host = await startHost(t)
+  // An intent applied before the reservation, or before a crash moved `applied`: its canonical post exists.
+  const legacy = { ...agent, rid: 'ui-legacy', kind: 'todo', channel: 'todos', text: 'Written before a crash.' } as const
+  await host.owner.post('todos', { id: 'app:ui-legacy', text: legacy.text, labels: { rid: legacy.rid, by: legacy.by } })
+  await host.submit(legacy)
+  // A UI post, then an agent intent that reuses its rid.
+  const ui = (await host.write({ kind: 'todo', text: 'From the UI.' })).json().rid
+  await host.submit({ ...agent, rid: ui, kind: 'todo', channel: 'todos', text: 'From the UI.' })
+  await host.writer.pass()
+
+  const refused = (await host.messages('inbox')).filter(({ labels }) => labels.rid === undefined && !labels.applied)
+    .map(({ text, labels }) => [JSON.parse(text).rid, labels.refused ?? null])
+  assert.deepEqual(refused, [['ui-legacy', null], [ui, 'rid']])
+  assert.deepEqual((await host.posted('ui-legacy')).labels, { rid: 'ui-legacy', by: 'laptop-claude', status: 'open' })
+  assert.deepEqual((await host.posted(ui)).labels, { rid: ui, by: 'user', status: 'open' })
+  assert.equal((await host.messages('todos')).length, 2)
+})
+
+test('A deleted root leaves every list and its thread read', async (t) => {
+  const host = await startHost(t)
+  const kept = (await host.write({ kind: 'todo', text: 'Kept.', repo: 'example/kept' })).json().rid
+  const gone = (await host.write({ kind: 'todo', text: 'Deleted.', repo: 'example/gone' })).json().rid
+  const resolved = (await host.write({ kind: 'todo', text: 'Resolved, then deleted.' })).json().rid
+  await host.write({ kind: 'done', root: resolved })
+  for (const rid of [gone, resolved]) await host.owner.delete((await host.posted(rid)).id)
+
+  const list = async (query: string) => (await host.call(`/api/ui/threads?${query}`)).json<{ threads: Thread[] }>().threads.map(({ message }) => message.id)
+  assert.deepEqual(await list('channel=todos'), [(await host.posted(kept)).id])
+  assert.deepEqual(await list('channel=todos&resolved=1'), [])
+  assert.deepEqual((await host.call('/api/ui/channels')).json<unknown>(), { repos: ['example/kept'] })
+  assert.equal((await host.call(`/api/ui/thread?rid=${gone}`)).status, 404)
+})
+
+test('A thread answered between the two Needs you reads shows only under answered', async (t) => {
+  let answer: (() => Promise<unknown>) | null = null
+  /** The read board: the user's answer lands just before the `ask=answered` read, once. */
+  const readBoard = (): Board => {
+    const handle = board()
+    return {
+      ...handle,
+      threads: (async (query: Parameters<Board['threads']>[0]) => {
+        const label = query?.label
+        if (answer && Array.isArray(label) && label.includes('ask=answered')) {
+          const run = answer
+          answer = null
+          await run()
+        }
+        return handle.threads(query)
+      }) as Board['threads'],
+    }
+  }
+  const host = await startHost(t, { readBoard })
+  await host.submit({ ...agent, rid: 'work-1', kind: 'work', channel: 'work', text: 'Goal.' })
+  await host.submit({ ...agent, rid: 'ask-1', root: 'work-1', kind: 'ask', text: 'Which port?', block: 1 })
+  await host.writer.pass()
+  answer = () => host.write({ kind: 'answer', root: 'work-1', re: 'ask-1', text: '8443.' })
+
+  const needsYou = (await host.call('/api/ui/needs-you')).json<{ open: Thread[]; answered: Thread[] }>()
+  assert.equal(answer, null, 'the answer ran between the reads')
+  assert.deepEqual([needsYou.open.map(({ message }) => message.labels.rid), needsYou.answered.map(({ message }) => message.labels.rid)], [[], ['work-1']])
 })

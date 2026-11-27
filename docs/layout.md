@@ -52,7 +52,7 @@ The app's state writer reads `inbox` in log order from the app marker's `applied
 | `json` | The text is not JSON. |
 | `deferred` | `kind` is `msg`, `queue`, `ack`, or `react`, which arrive in release 2. |
 | `invalid` | The intent does not match the release 1 schema: for example `kind=answer`, `by=user`, a state field such as `status`, or text or a label value Board cannot store. Also an intent whose canonical post Board refuses with a 400. |
-| `rid` | The `rid` already names another post: a different channel, parent, kind, text, or label, or a deleted post. Also any `rid` that starts with `ui-`, ignoring case: the UI route's namespace. |
+| `rid` | The `rid` already names another post: a different channel, parent, kind, text, or label, or a deleted post. Also a new post whose `rid` starts with `ui-`, ignoring case: the UI route's namespace. An intent whose own canonical post already exists still replays. |
 | `repo` | `repo` is not `<owner>/<repo>` with its owner on the host allowlist (`devchat-host install --allowlist <owner,...>`). An empty allowlist refuses every `repo`. |
 | `root` | No todo, work, or message root has the `rid` that `root` names, or that root is deleted. |
 | `profile` | A reply in `msg` comes from a profile other than `coordinator`. |
