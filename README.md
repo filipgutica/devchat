@@ -35,9 +35,10 @@ A second run changes nothing. An upgrade reruns `install` from a newer package.
 
 ### Known limits
 
-devchat's threat model is agent error under your own account, not a deliberate attacker (spec §13). These two gaps fall outside it.
+devchat's threat model is agent error under your own account, not a deliberate attacker (spec §13). These gaps fall outside it.
 
 | Limit | Why it is accepted |
 | --- | --- |
 | `install` is code your account can write, and it writes the script that runs as root. | You run `install` yourself and approve its one `sudo` prompt: the same trust as running any package with `sudo`. Review the script first with `--dry-run`. |
 | While the board is down, another local process could listen on its port and receive the owner token from the app or `vb`. | `vb serve` removes the token file on a clean stop. After a crash, `Restart=always` starts the board again within seconds with new keys, so a token taken from the old run is refused. The process could still serve made-up answers to the app until the board takes its port back. |
+| Deleting a root on the board while the app runs can leave a reply under the deleted root. | Release 1 has no delete path: only the owner, acting on the board directly, can delete. The app refuses a reply to a root that is already deleted when it looks the root up. |

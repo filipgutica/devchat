@@ -347,6 +347,25 @@ test('Ingest: a reused rid on a reply to another root, or with other text, is re
   assert.deepEqual([await replies('work-a'), await replies('work-b')], [1, 0])
 })
 
+test('Ingest: a reused rid on a root in another channel, or on a deleted canonical post, is refused as rid', async (t) => {
+  const host = await startHost(t)
+  await host.submit({ ...base, rid: 'item-1', kind: 'todo', channel: 'todos', text: 'Same text.' })
+  await host.writer().pass()
+  const asWork = await host.submit({ ...base, rid: 'item-1', kind: 'work', channel: 'work', text: 'Same text.' }, 'item-1-work')
+  await host.submit(work('work-1'))
+  await host.submit({ ...base, rid: 'note-1', kind: 'note', root: 'work-1', text: 'Deleted later.' })
+  await host.writer().pass()
+  await host.owner.delete((await host.owner.posted('app:note-1')).id)
+  const replayed = await host.submit({ ...base, rid: 'note-1', kind: 'note', root: 'work-1', text: 'Deleted later.' }, 'note-1-again')
+  await host.writer().pass()
+
+  const inbox = await host.messages('inbox')
+  assert.equal(inbox.find(({ id }) => id === asWork)?.labels.refused, 'rid')
+  assert.equal(inbox.find(({ id }) => id === replayed)?.labels.refused, 'rid')
+  assert.deepEqual((await host.messages('work')).map(({ labels }) => labels.rid).filter(Boolean), ['work-1'])
+  assert.equal(await host.applied(), replayed)
+})
+
 test('Ingest: a root deleted on the board stalls nothing: its fold is skipped, a new reply to it is refused as root, and applied moves on', async (t) => {
   const host = await startHost(t)
   await host.submit(work('work-1'))

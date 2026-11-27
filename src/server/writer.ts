@@ -161,11 +161,14 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
    * same parent root, text, and labels. A root's state labels change with its thread, and its `env`
    * with the host's machine map, so neither is compared. A rid reused by another intent is not.
    */
-  function isReplay(written: MessageView, post: { text: string; labels: Labels }, parent: MessageView | null) {
+  function isReplay(intent: Intent, written: MessageView, post: { text: string; labels: Labels }, target: MessageView | null) {
     const fixed = (labels: Labels) => (written.re === null
       ? Object.fromEntries(Object.entries(labels).filter(([key]) => !isStateLabel(key) && key !== 'env'))
       : labels)
-    return written.re === (parent?.id ?? null) && written.text === post.text && isDeepStrictEqual(fixed(written.labels), fixed(post.labels))
+    const place = 'root' in intent
+      ? target !== null && written.re === target.id
+      : written.re === null && written.channel === intent.channel
+    return place && written.text === post.text && isDeepStrictEqual(fixed(written.labels), fixed(post.labels))
   }
 
   async function writeRoot(port: BoardPort, intent: Extract<Intent, { kind: 'todo' | 'work' }>, post: { text: string; labels: Labels }) {
@@ -211,9 +214,8 @@ export function createStateWriter({ settings, stateFile, openBoard = () => board
     // No intent Board accepted fails the checks above, so they refuse nothing that was applied.
     const written = await findOwn(port, `app:${intent.rid}`)
     if (written) {
-      // A deleted post keeps no text or labels to compare, and its thread no state to write.
-      if (written.deleted) return null
-      if (!isReplay(written, post, target)) return 'rid'
+      // A deleted post keeps no text or labels, so nothing proves it was this intent's.
+      if (written.deleted || !isReplay(intent, written, post, target)) return 'rid'
       await foldThread(port, written.re ?? written.id)
       return null
     }

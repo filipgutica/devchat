@@ -39,7 +39,7 @@ Release 1 refuses `msg`, `queue`, `ack`, and reactions (`react`). The app writes
 
 ## Ingest
 
-The app's state writer reads `inbox` in log order from the app marker's `applied` label, every 15 s. For each intent it writes the canonical post, or sets `refused=<reason>` on the intent's `inbox` post and writes nothing. It validates each intent first, then looks for `app:<rid>`. When that post is this intent's canonical post, with the same parent root, text, and labels, the intent was already applied: a replay only folds that post's thread again and repeats no other check, such as the pending guard. A root's state labels and `env` are not compared, since they change after the root is written. Any other post with that ID refuses the intent as `rid`. A deleted canonical post counts as applied.
+The app's state writer reads `inbox` in log order from the app marker's `applied` label, every 15 s. For each intent it writes the canonical post, or sets `refused=<reason>` on the intent's `inbox` post and writes nothing. It validates each intent first, then looks for `app:<rid>`. When that post is this intent's canonical post, in the same channel, with the same parent root, text, and labels, the intent was already applied: a replay only folds that post's thread again and repeats no other check, such as the pending guard. A root's state labels and `env` are not compared, since they change after the root is written. Any other post with that ID refuses the intent as `rid`, and so does a deleted one, which keeps no text or labels to compare.
 
 - A new root carries `rid`, `by`, and the routing labels `repo`, `machine`, `env`, and `thread`, set once; a work item also carries `issue`. The app sets `env` from the host's machine map (`devchat-host install --machine <name>=<T3 environment ID>`) and leaves it unset for a machine the map does not name.
 - A reply carries `rid`, `by`, `kind`, and the applicable `re`, `block=1`, or `pr.<n>`, where `<n>` is the number at the end of the `pr` URL's `/pull/<n>` path.
@@ -52,7 +52,7 @@ The app's state writer reads `inbox` in log order from the app marker's `applied
 | `json` | The text is not JSON. |
 | `deferred` | `kind` is `msg`, `queue`, `ack`, or `react`, which arrive in release 2. |
 | `invalid` | The intent does not match the release 1 schema: for example `kind=answer`, `by=user`, a state field such as `status`, or text or a label value Board cannot store. Also an intent whose canonical post Board refuses with a 400. |
-| `rid` | The `rid` already names another post: a different root, parent, kind, text, or label. |
+| `rid` | The `rid` already names another post: a different channel, parent, kind, text, or label, or a deleted post. |
 | `repo` | `repo` is not `<owner>/<repo>` with its owner on the host allowlist (`devchat-host install --allowlist <owner,...>`). An empty allowlist refuses every `repo`. |
 | `root` | No todo, work, or message root has the `rid` that `root` names, or that root is deleted. |
 | `profile` | A reply in `msg` comes from a profile other than `coordinator`. |
