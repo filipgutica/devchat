@@ -8,7 +8,7 @@ import { installSteps, renderPlan, renderScript, uninstallSteps } from '../src/h
 import type { Settings } from '../src/host/settings.ts'
 import { renderUnits } from '../src/host/units.ts'
 
-const settings: Settings = { login: 'user@example.com', host: 'host.example.ts.net', httpsPort: 8443, boardPort: 4100, appPort: 4101 }
+const settings: Settings = { login: 'user@example.com', host: 'host.example.ts.net', httpsPort: 8443, boardPort: 4100, appPort: 4101, allowlist: [], machines: {} }
 const sources = {
   nodeSource: '/home/user/.nvm/versions/node/v24.0.0/bin/node',
   modulesSource: "/tmp/it's here/node_modules",

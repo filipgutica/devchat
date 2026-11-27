@@ -12,7 +12,7 @@ Status: under construction. The client CLI ships as the `devchat` plugin in [fil
 
 ```sh
 npm install --ignore-scripts --prefix ~/devchat-host @filipgutica/devchat
-~/devchat-host/node_modules/.bin/devchat-host install --login user@example.com --host <host>.<tailnet>.ts.net
+~/devchat-host/node_modules/.bin/devchat-host install --login user@example.com --host <host>.<tailnet>.ts.net --allowlist <github-owner>
 ```
 
 The script:
@@ -24,6 +24,8 @@ The script:
 5. Unless the board already runs locked, stops and disables it with its app and export timer, confirms with systemd that none runs or starts at boot, and locks it: it starts the board on loopback only, on its port plus 10000 (a port no route points to), and revokes Board's default grants. The board is safe while it is locked or stopped, whatever routes point at it. Only then are the units enabled again. If any of this fails, install exits with them stopped and disabled. Then it starts the board service, sets the grants for your tailnet login, checks them with `grants explain`, and posts the board marker.
 6. Starts the app on `127.0.0.1` and the daily export timer, which keeps 14 exports in `/var/lib/devchat/exports`.
 7. Only then runs `tailscale serve --bg --https=8443` for `/api/board` and `/`, and records them in `/etc/devchat/routes.json` once tailscale shows them. devchat needs its HTTPS port to itself: install refuses a port with any other route, Funnel, or a listener other than HTTPS, and says how to clear it. It removes devchat's old mounts from the recorded port. If a change fails, it stops and disables the board, confirms it, and prints the commands that remove devchat's routes. Pass `--no-expose` to skip this.
+
+`--allowlist <owner,...>` names the GitHub owners whose repos may appear on the board; the app refuses an intent for any other repo, and every repo when the list is empty. `--machine <name>=<T3 environment ID>`, repeated, maps each machine to its T3 environment, which the app records as a work item's `env`. Both go to `/etc/devchat/app.json`, so pass them on every run.
 
 A second run changes nothing. An upgrade reruns `install` from a newer package.
 

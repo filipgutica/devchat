@@ -9,7 +9,7 @@ import { parseSelfName, parseServeStatus, planServe } from '../src/host/serve.ts
 import { rootFileProblems, settingsSchema, type Settings } from '../src/host/settings.ts'
 import { parseUnitShow } from '../src/host/verify.ts'
 
-const settings: Settings = { login: 'user@example.com', host: 'host.example.ts.net', httpsPort: 8443, boardPort: 4100, appPort: 4101 }
+const settings: Settings = { login: 'user@example.com', host: 'host.example.ts.net', httpsPort: 8443, boardPort: 4100, appPort: 4101, allowlist: [], machines: {} }
 /** A serve status with HTTPS listeners on every port the routes use, and Funnel on for `funnel`. */
 const web = (routes: Record<string, Record<string, string>>, { funnel = [] as string[], http = [] as string[] } = {}) => JSON.stringify({
   TCP: Object.fromEntries(Object.keys(routes).map((origin) => [origin.slice(origin.lastIndexOf(':') + 1), http.includes(origin) ? { HTTP: true } : { HTTPS: true }])),
@@ -119,6 +119,12 @@ test('a tailnet login is lowercased at input and must fit Board\'s login rule', 
   for (const login of ['user+tag@example.com', '.user@example.com', `${'a'.repeat(65)}@example.com`, 'user@', 'user']) {
     assert.equal(parse(login).success, false, login)
   }
+})
+
+test('an app.json from before the allowlist parses with an empty allowlist and machine map', () => {
+  const { allowlist: _allowlist, machines: _machines, ...before } = settings
+  assert.deepEqual(settingsSchema.parse(before), { ...before, allowlist: [], machines: {} })
+  assert.equal(settingsSchema.safeParse({ ...settings, allowlist: ['owner/repo'] }).success, false)
 })
 
 test('rootFileProblems trusts only a root-owned regular file that only root can write', async (t) => {

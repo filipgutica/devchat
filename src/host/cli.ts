@@ -19,7 +19,8 @@ const usage = `usage: devchat-host <command> [options]
 
   install     set up the devchat host with one sudo prompt (prints every step first)
               --login <tailnet login> --host <name>.ts.net [--https-port 8443]
-              [--board-port 4100] [--app-port 4101] [--node <path>] [--no-expose] [--dry-run]
+              [--board-port 4100] [--app-port 4101] [--allowlist <owner,...>]
+              [--machine <name>=<T3 environment ID>]... [--node <path>] [--no-expose] [--dry-run]
   verify      run the release 1 trust checks from your own account, without sudo
               --login <tailnet login> --host <name>.ts.net [ports as install] [--no-expose]
   status      show the services and what the app reports   [--app-port 4101] [--wait <seconds>]
@@ -34,6 +35,8 @@ const settingFlags = {
   'https-port': { type: 'string' },
   'board-port': { type: 'string' },
   'app-port': { type: 'string' },
+  allowlist: { type: 'string' },
+  machine: { type: 'string', multiple: true },
   'no-expose': { type: 'boolean' },
 } as const
 
@@ -47,14 +50,26 @@ async function ask(question: string) {
   }
 }
 
-async function resolveSettings(values: { login?: string; host?: string; 'https-port'?: string; 'board-port'?: string; 'app-port'?: string }): Promise<Settings> {
+type SettingValues = {
+  login?: string; host?: string; 'https-port'?: string; 'board-port'?: string; 'app-port'?: string
+  allowlist?: string; machine?: string[]
+}
+
+async function resolveSettings(values: SettingValues): Promise<Settings> {
   const port = (value: string | undefined, fallback: number) => (value === undefined ? fallback : Number(value))
+  const machines = (values.machine ?? []).map((entry) => {
+    const split = entry.indexOf('=')
+    if (split < 1) throw new Error(`--machine ${entry}: use <name>=<T3 environment ID>`)
+    return [entry.slice(0, split), entry.slice(split + 1)]
+  })
   return settingsSchema.parse({
     login: values.login ?? await ask('Tailnet login (user@example.com): '),
     host: values.host ?? await ask('Host name on the tailnet (<host>.<tailnet>.ts.net): '),
     httpsPort: port(values['https-port'], defaultPorts.httpsPort),
     boardPort: port(values['board-port'], defaultPorts.boardPort),
     appPort: port(values['app-port'], defaultPorts.appPort),
+    allowlist: values.allowlist?.split(',').map((owner) => owner.trim()).filter(Boolean) ?? [],
+    machines: Object.fromEntries(machines),
   })
 }
 

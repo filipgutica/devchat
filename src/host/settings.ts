@@ -46,6 +46,13 @@ export const settingsSchema = z.object({
   httpsPort: port,
   boardPort: port,
   appPort: port,
+  /**
+   * GitHub owners whose repos may appear on the board (§5). An intent's `repo` must be
+   * `<owner>/<repo>` with its owner here, ignoring case. Empty refuses every repo.
+   */
+  allowlist: z.array(z.string().regex(/^[A-Za-z0-9-]{1,39}$/, 'a GitHub owner such as octocat')).default([]),
+  /** Machine name to T3 environment ID: the app sets a work item's `env` from it (§2). */
+  machines: z.record(z.string().min(1).max(256), z.string().min(1).max(256)).default({}),
 }).strict()
 
 export type Settings = z.infer<typeof settingsSchema>
